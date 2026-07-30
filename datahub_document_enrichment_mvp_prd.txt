@@ -1,0 +1,393 @@
+DataHub Document Enrichment Agent - MVP PRD
+版本：v0.1
+日期：2026-07-30
+
+一、产品概述
+
+本项目是一个基于 DataHub 的文档元数据增强工具。
+
+用户上传一篇数据相关文档后，系统自动理解文档内容，并结合 DataHub 中已有的元数据，为文档推荐：
+
+1. Domain
+2. Tags
+3. Owner
+4. 相关 Dataset
+
+用户确认推荐结果后，系统将文档及其元数据写入 DataHub，使文档更容易通过搜索、数据实体页面和业务分类被后续用户或 Agent 找到。
+
+MVP 主要面向数据相关文档，例如：
+
+- 指标定义
+- 数据表说明
+- 数据质量规则
+- Dashboard 使用指南
+- 数据事故处理 Runbook
+- 数据政策和业务定义
+
+
+二、问题背景
+
+企业内部经常会生成大量文档，但文档创建完成后通常存在以下问题：
+
+- 缺少统一的 Domain 和 Tag
+- 不知道应该由哪个团队负责
+- 文档没有关联到实际的数据表
+- 用户只能依赖标题或正文关键词进行搜索
+- 相同概念使用不同名称，导致检索困难
+- 文档与 DataHub 中的数据资产彼此孤立
+
+本项目希望在文档进入知识库时自动完成初步整理，并由用户进行最终确认。
+
+
+三、目标用户
+
+主要用户：
+
+- 数据工程师
+- 数据分析师
+- Analytics Engineer
+- 数据平台团队
+- 数据治理负责人
+
+典型场景：
+
+用户上传一篇《Revenue Recognition Policy》文档，系统自动推荐：
+
+- Domain：Finance
+- Tags：revenue、policy
+- Owner：Finance Analytics
+- Related Datasets：fct_orders、payments、refunds
+
+
+四、MVP 目标
+
+MVP 需要验证以下假设：
+
+1. LLM 能否从数据文档中识别核心主题和数据实体。
+2. 系统能否从 DataHub 已有元数据中选择合适的 Domain、Tag、Owner 和 Dataset。
+3. 用户是否愿意审核并接受系统推荐。
+4. 添加这些元数据和关系后，文档是否更容易被发现和理解。
+
+MVP 不追求全自动发布。所有推荐必须由用户确认后才写入 DataHub。
+
+
+五、核心用户流程
+
+1. 用户上传 Markdown 或 TXT 文档。
+2. 系统读取文档标题和正文。
+3. 系统从 DataHub 获取：
+   - 已有 Domains
+   - 已有 Tags
+   - 已有 Users 和 Teams
+   - 已有 Datasets 及其 schema、description 和 owner
+4. 系统识别文档中的：
+   - 业务主题
+   - 表名和字段名
+   - 可能的数据负责人
+   - 关键业务概念
+5. 系统生成候选推荐和置信度。
+6. 用户在审核页面接受、拒绝或修改推荐。
+7. 系统将文档和确认后的元数据写入 DataHub。
+8. 用户可以从 DataHub 搜索文档，或从相关 Dataset 页面访问该文档。
+
+
+六、MVP 功能范围
+
+1. 文档上传
+
+支持：
+
+- Markdown
+- TXT
+- 单篇文档上传
+
+暂不支持：
+
+- PDF
+- Word
+- Notion
+- Confluence
+- 批量导入
+
+
+2. Metadata 推荐
+
+MVP 推荐以下四类信息：
+
+- Domain：从 DataHub 已有 Domain 中选择一个
+- Tags：从 DataHub 已有 Tags 中推荐最多 5 个
+- Owner：从已有 User 或 Team 中推荐候选人
+- Related Datasets：推荐最多 5 个相关数据集
+
+
+3. 推荐证据
+
+每个推荐需要包含：
+
+- 推荐对象
+- 置信度
+- 简短原因
+
+示例：
+
+Dataset：warehouse.finance.fct_orders
+置信度：0.94
+原因：文档正文多次出现 fct_orders，并包含查询该表的 SQL。
+
+
+4. 人工审核
+
+用户可以：
+
+- 接受推荐
+- 删除推荐
+- 更换候选项
+- 手动搜索 DataHub 中的其他实体
+- 确认并发布
+
+
+5. 写入 DataHub
+
+发布后创建或更新：
+
+- Document
+- Domain
+- Tags
+- Owner
+- Related Dataset 关系
+
+
+七、非目标
+
+MVP 暂不实现：
+
+- 自动创建新的 Domain、Tag 或 Owner
+- 自动发布未经审核的内容
+- 通用企业文档管理
+- 文档正文自动生成
+- Dashboard 和 Pipeline 关联
+- Glossary Term 推荐
+- 多语言检索评估
+- 完整权限管理
+- DataHub 核心代码修改
+
+
+八、示例数据
+
+推荐使用 Jaffle Shop 作为示例业务。
+
+数据实体可包括：
+
+- customers
+- orders
+- order_items
+- products
+- payments
+- stores
+- supplies
+- fct_orders
+- customer_lifetime_value
+- daily_sales
+
+基础环境：
+
+Jaffle Shop 数据
+→ PostgreSQL
+→ dbt
+→ DataHub
+
+
+九、示例文档
+
+MVP 准备 6 至 10 篇 Markdown 文档，每篇约 300 至 800 字。
+
+建议文档：
+
+1. Revenue Recognition Policy
+   - 关联 orders、payments、refunds
+
+2. Customer Lifetime Value Definition
+   - 关联 customers、orders、payments
+
+3. Daily Sales Dashboard Guide
+   - 关联 daily_sales、orders、stores
+
+4. Order Data Quality Rules
+   - 关联 orders、order_items
+
+5. Payment Failure Runbook
+   - 关联 payments 和 payment pipeline
+
+6. Customer PII Policy
+   - 关联 customers，以及 email、address 等字段
+
+
+十、测试标准答案
+
+每篇文档需要提前维护一份标准答案，用来评估推荐质量。
+
+示例：
+
+document: revenue-recognition.md
+
+expected:
+  domain:
+    - finance
+
+  tags:
+    - revenue
+    - policy
+
+  owner:
+    - finance-analytics
+
+  datasets:
+    - fct_orders
+    - payments
+    - refunds
+
+
+十一、推荐逻辑
+
+系统使用两层逻辑。
+
+第一层：确定性匹配
+
+- 表名精确匹配
+- 字段名精确匹配
+- SQL 中的数据实体
+- 文档路径和作者
+- Dataset owner
+- Domain 和 Tag 候选列表
+
+第二层：LLM 排序和解释
+
+- 理解文档主题
+- 对候选 Domain 和 Tag 排序
+- 判断相关 Dataset
+- 推荐 Owner
+- 生成推荐原因
+
+LLM 只能从 DataHub 已有实体中选择，不能直接创建新的标签或负责人。
+
+
+十二、技术方案
+
+建议技术栈：
+
+Backend：
+- Python
+- FastAPI
+- DataHub Python SDK 或 GraphQL API
+- Pydantic
+
+Frontend：
+- React、Next.js 或简单服务端页面
+
+LLM：
+- 支持可配置模型提供商
+- 使用结构化 JSON 输出
+
+Infrastructure：
+- Docker Compose
+- DataHub Quickstart
+- PostgreSQL
+- dbt
+- Jaffle Shop
+
+
+十三、核心数据结构
+
+推荐结果示例：
+
+{
+  "document_title": "Revenue Recognition Policy",
+  "domain": {
+    "urn": "urn:li:domain:finance",
+    "confidence": 0.93,
+    "reason": "The document defines financial revenue recognition rules."
+  },
+  "tags": [
+    {
+      "urn": "urn:li:tag:revenue",
+      "confidence": 0.96,
+      "reason": "Revenue is the central subject of the document."
+    }
+  ],
+  "owner_candidates": [
+    {
+      "urn": "urn:li:corpGroup:finance-analytics",
+      "confidence": 0.84,
+      "reason": "The related datasets are owned by Finance Analytics."
+    }
+  ],
+  "related_datasets": [
+    {
+      "urn": "urn:li:dataset:fct_orders",
+      "confidence": 0.95,
+      "reason": "The dataset name appears directly in the document."
+    }
+  ]
+}
+
+
+十四、成功指标
+
+MVP 可以使用以下指标：
+
+1. Dataset 关联准确率
+   - 推荐的数据集中有多少是正确的
+
+2. Dataset 关联召回率
+   - 标准答案中的相关数据集有多少被推荐出来
+
+3. Domain 准确率
+   - 推荐 Domain 是否与标准答案一致
+
+4. Tag 接受率
+   - 用户最终接受了多少推荐 Tag
+
+5. Owner 接受率
+   - 用户是否接受推荐 Owner
+
+6. 审核时间
+   - 用户完成一次文档审核所需时间
+
+初始目标：
+
+- Domain 准确率 ≥ 80%
+- Related Dataset Precision@5 ≥ 70%
+- Related Dataset Recall@5 ≥ 70%
+- 用户平均审核时间 ≤ 2 分钟
+
+
+十五、验收标准
+
+MVP 完成时应能够演示以下完整流程：
+
+1. DataHub 中已存在 Jaffle Shop 数据实体。
+2. 用户上传一篇 Revenue Recognition 文档。
+3. 系统读取 DataHub 已有元数据。
+4. 系统推荐 Finance Domain、相关 Tags、Owner 和 Datasets。
+5. 推荐结果包含置信度和原因。
+6. 用户可以修改并确认推荐。
+7. 系统将文档和关系写入 DataHub。
+8. 用户可以在 DataHub 中搜索到文档。
+9. 用户可以从相关 Dataset 页面找到该文档。
+
+
+十六、后续版本
+
+MVP 验证成功后，可以增加：
+
+- Glossary Term 推荐
+- Dashboard 和 Pipeline 关联
+- PDF、Word、Notion 和 Confluence 导入
+- 批量文档处理
+- 文档更新后的 metadata 重新评估
+- 过期文档检测
+- Retrieval Readiness Score
+- 自动生成检索测试问题
+- DataHub 搜索效果评估
+- GitHub Pull Request 审核流程
+- 根据用户反馈持续优化推荐模型
