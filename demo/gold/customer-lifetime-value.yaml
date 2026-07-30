@@ -1,0 +1,6 @@
+document: customer-lifetime-value.md
+expected:
+  domain: customer
+  tags: [revenue, pii]
+  owner: customer-analytics
+  datasets: [customer_lifetime_value, customers, orders, payments]

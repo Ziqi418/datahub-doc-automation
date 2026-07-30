@@ -1,0 +1,36 @@
+{
+  "platform": "jaffle_shop",
+  "env": "PROD",
+  "domains": [
+    {"id": "finance", "name": "Finance", "description": "Revenue, payments, refunds and financial reporting."},
+    {"id": "customer", "name": "Customer", "description": "Customer identity, lifecycle and privacy."},
+    {"id": "operations", "name": "Operations", "description": "Store operations, sales operations and data quality."}
+  ],
+  "tags": [
+    {"id": "revenue", "description": "Revenue-related asset"},
+    {"id": "policy", "description": "Business policy or governance rule"},
+    {"id": "pii", "description": "Personally identifiable information"},
+    {"id": "data-quality", "description": "Data quality monitoring or rules"},
+    {"id": "runbook", "description": "Operational runbook"},
+    {"id": "payments", "description": "Payments-related asset"},
+    {"id": "sales", "description": "Sales-related asset"}
+  ],
+  "teams": [
+    {"id": "finance-analytics", "name": "Finance Analytics", "description": "Owns revenue and payments metrics."},
+    {"id": "customer-analytics", "name": "Customer Analytics", "description": "Owns customer metrics and privacy data."},
+    {"id": "data-platform", "name": "Data Platform", "description": "Owns operational data quality and platform runbooks."}
+  ],
+  "datasets": [
+    {"name": "customers", "description": "Customer master records, lifecycle attributes, email and address.", "fields": ["customer_id", "first_name", "last_name", "email", "address", "created_at"], "domain": "customer", "owner": "customer-analytics", "tags": ["pii"]},
+    {"name": "orders", "description": "One record for every customer order and its order status.", "fields": ["order_id", "customer_id", "order_date", "status", "store_id"], "domain": "operations", "owner": "data-platform", "tags": ["sales", "data-quality"]},
+    {"name": "order_items", "description": "Line items belonging to customer orders with product and quantity.", "fields": ["order_item_id", "order_id", "product_id", "quantity", "unit_price"], "domain": "operations", "owner": "data-platform", "tags": ["sales", "data-quality"]},
+    {"name": "products", "description": "Product catalog including product category and list price.", "fields": ["product_id", "product_name", "category", "list_price"], "domain": "operations", "owner": "data-platform", "tags": ["sales"]},
+    {"name": "payments", "description": "Payment attempts, payment method, amount and payment status for orders.", "fields": ["payment_id", "order_id", "payment_method", "amount", "payment_status", "failure_reason"], "domain": "finance", "owner": "finance-analytics", "tags": ["payments", "revenue"]},
+    {"name": "refunds", "description": "Refund transactions linked to payments and orders for revenue reconciliation.", "fields": ["refund_id", "payment_id", "order_id", "refund_amount", "refunded_at", "reason"], "domain": "finance", "owner": "finance-analytics", "tags": ["payments", "revenue"]},
+    {"name": "stores", "description": "Store directory with region, manager and operational status.", "fields": ["store_id", "store_name", "region", "manager", "status"], "domain": "operations", "owner": "data-platform", "tags": ["sales"]},
+    {"name": "supplies", "description": "Inventory supplies purchased by stores for operations.", "fields": ["supply_id", "store_id", "supply_name", "quantity", "purchased_at"], "domain": "operations", "owner": "data-platform", "tags": []},
+    {"name": "fct_orders", "description": "Finance-ready order fact with gross revenue, payment and refund amounts.", "fields": ["order_id", "customer_id", "order_date", "gross_revenue", "payment_amount", "refund_amount", "net_revenue"], "domain": "finance", "owner": "finance-analytics", "tags": ["revenue", "sales"]},
+    {"name": "customer_lifetime_value", "description": "Customer lifetime value metric derived from customer orders and payments.", "fields": ["customer_id", "lifetime_value", "order_count", "first_order_at", "last_order_at"], "domain": "customer", "owner": "customer-analytics", "tags": ["revenue"]},
+    {"name": "daily_sales", "description": "Daily sales dashboard aggregate by order date, store and net revenue.", "fields": ["sales_date", "store_id", "order_count", "gross_revenue", "net_revenue"], "domain": "operations", "owner": "finance-analytics", "tags": ["sales", "revenue"]}
+  ]
+}

@@ -1,0 +1,6 @@
+document: refund-reconciliation.md
+expected:
+  domain: finance
+  tags: [revenue, payments]
+  owner: finance-analytics
+  datasets: [refunds, payments, fct_orders]

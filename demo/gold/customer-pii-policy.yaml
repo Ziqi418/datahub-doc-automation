@@ -1,0 +1,6 @@
+document: customer-pii-policy.md
+expected:
+  domain: customer
+  tags: [pii, policy]
+  owner: customer-analytics
+  datasets: [customers, customer_lifetime_value]

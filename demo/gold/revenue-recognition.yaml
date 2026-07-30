@@ -1,0 +1,6 @@
+document: revenue-recognition.md
+expected:
+  domain: finance
+  tags: [revenue, policy]
+  owner: finance-analytics
+  datasets: [fct_orders, payments, refunds]
