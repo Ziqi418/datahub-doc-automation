@@ -1,0 +1,6 @@
+document: payment-failure-runbook.md
+expected:
+  domain: finance
+  tags: [payments, runbook]
+  owner: finance-analytics
+  datasets: [payments, orders, refunds]

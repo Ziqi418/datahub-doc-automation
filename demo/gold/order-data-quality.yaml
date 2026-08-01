@@ -1,0 +1,6 @@
+document: order-data-quality.md
+expected:
+  domain: operations
+  tags: [data-quality]
+  owner: data-platform
+  datasets: [orders, order_items, customers, products]

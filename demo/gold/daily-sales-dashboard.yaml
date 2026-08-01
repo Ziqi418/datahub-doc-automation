@@ -1,0 +1,6 @@
+document: daily-sales-dashboard.md
+expected:
+  domain: operations
+  tags: [sales]
+  owner: finance-analytics
+  datasets: [daily_sales, stores, orders]

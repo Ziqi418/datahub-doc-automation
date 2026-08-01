@@ -1,0 +1,6 @@
+document: store-sales-operations.md
+expected:
+  domain: operations
+  tags: [sales, data-quality]
+  owner: data-platform
+  datasets: [daily_sales, stores, orders]
