@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
@@ -59,7 +60,7 @@ def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> li
                     Evidence(kind="sql_table_reference", matched_text=reference.text, location=reference.location),
                 )
         qualified = dataset.qualified_name.casefold()
-        if qualified and qualified in lower_body:
+        if qualified and _contains_exact_name(lower_body, qualified):
             candidate.add(90, Evidence(kind="exact_dataset_name", matched_text=dataset.qualified_name, location="document body"))
         short = dataset.name.casefold()
         if short and short in extracted.tokens:
@@ -89,6 +90,10 @@ def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> li
             )
     # Include direct SQL matches even when otherwise tied, then preserve a deterministic order.
     return sorted(candidates.values(), key=lambda item: (-item.score, item.dataset.urn))
+
+
+def _contains_exact_name(text: str, name: str) -> bool:
+    return bool(re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", text))
 
 
 def _dataset_recommendations(candidates: list[_Candidate]) -> list[Recommendation]:
