@@ -48,14 +48,15 @@ def seed(data: dict, gms_server: str, token: str | None) -> None:
         from datahub.emitter.rest_emitter import DatahubRestEmitter
         from datahub.metadata.schema_classes import (
             CorpGroupInfoClass,
+            CorpUserInfoClass,
             DatasetPropertiesClass,
             DomainPropertiesClass,
             DomainsClass,
             GlobalTagsClass,
+            OtherSchemaClass,
             OwnerClass,
             OwnershipClass,
             OwnershipTypeClass,
-            OtherSchemaClass,
             SchemaFieldClass,
             SchemaFieldDataTypeClass,
             SchemaMetadataClass,
@@ -76,7 +77,22 @@ def seed(data: dict, gms_server: str, token: str | None) -> None:
     for tag in data["tags"]:
         emit(f"urn:li:tag:{tag['id']}", TagPropertiesClass(name=tag["id"], description=tag["description"]))
     for team in data["teams"]:
-        emit(f"urn:li:corpgroup:{team['id']}", CorpGroupInfoClass(name=team["name"], description=team["description"]))
+        emit(
+            f"urn:li:corpGroup:{team['id']}",
+            CorpGroupInfoClass(
+                admins=[],
+                members=[],
+                groups=[],
+                displayName=team["name"],
+                description=team["description"],
+            ),
+        )
+        # DataHub 1.6 permits CorpUser, but not CorpGroup, in Dataset ownership.
+        # Keep the demo group and create a same-ID technical owner for each team.
+        emit(
+            f"urn:li:corpuser:{team['id']}",
+            CorpUserInfoClass(active=True, displayName=team["name"], title="Demo team owner"),
+        )
     platform_urn = f"urn:li:dataPlatform:{data['platform']}"
     for dataset in data["datasets"]:
         urn = f"urn:li:dataset:({platform_urn},{dataset['name']},{data['env']})"
@@ -100,7 +116,17 @@ def seed(data: dict, gms_server: str, token: str | None) -> None:
                 ],
             ),
         )
-        emit(urn, OwnershipClass(owners=[OwnerClass(owner=f"urn:li:corpgroup:{dataset['owner']}", type=OwnershipTypeClass.TECHNICAL_OWNER)]))
+        emit(
+            urn,
+            OwnershipClass(
+                owners=[
+                    OwnerClass(
+                        owner=f"urn:li:corpuser:{dataset['owner']}",
+                        type=OwnershipTypeClass.TECHNICAL_OWNER,
+                    )
+                ]
+            ),
+        )
         emit(urn, DomainsClass(domains=[f"urn:li:domain:{dataset['domain']}"]))
         emit(urn, GlobalTagsClass(tags=[TagAssociationClass(tag=f"urn:li:tag:{tag}") for tag in dataset["tags"]]))
 
