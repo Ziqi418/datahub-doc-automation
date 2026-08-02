@@ -140,3 +140,10 @@ class CatalogSearchItem(CatalogEntity):
 class CatalogSearchResponse(BaseModel):
     items: list[CatalogSearchItem]
     limit: int
+
+
+class CatalogRefreshResponse(BaseModel):
+    domains: int
+    tags: int
+    owners: int
+    datasets: int
