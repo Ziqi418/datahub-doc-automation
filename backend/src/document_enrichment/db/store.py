@@ -7,6 +7,7 @@ from pathlib import Path
 from document_enrichment.models import (
     AnalysisRecord,
     AnalysisStatus,
+    DocumentFreshnessStatus,
     RecommendationSet,
     ReviewAction,
     ReviewSelection,
@@ -206,6 +207,57 @@ class SQLiteAnalysisStore:
             for row in rows
         ]
 
+    def save_publish_result(
+        self,
+        analysis_id: str,
+        *,
+        document_urn: str,
+        dataset_baseline_json: str,
+        published_at: datetime,
+    ) -> AnalysisRecord:
+        now = utcnow().isoformat()
+        with self._connect() as connection:
+            result = connection.execute(
+                """
+                UPDATE analyses
+                SET status = ?, document_urn = ?, dataset_baseline_json = ?, published_at = ?,
+                    freshness_status = ?, freshness_reason = NULL, last_freshness_checked_at = ?,
+                    error_code = NULL, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (AnalysisStatus.PUBLISHED.value, document_urn, dataset_baseline_json,
+                 published_at.isoformat(), DocumentFreshnessStatus.ACTIVE.value,
+                 published_at.isoformat(), now, analysis_id, AnalysisStatus.PUBLISHING.value),
+            )
+        if result.rowcount != 1:
+            raise InvalidStateError("Analysis changed concurrently; retry the request")
+        return self.get(analysis_id)
+
+    def save_publish_failure(self, analysis_id: str, error_code: str) -> AnalysisRecord:
+        return self.transition(analysis_id, AnalysisStatus.PUBLISH_FAILED, error_code=error_code)
+
+    def save_freshness_check(
+        self, analysis_id: str, *, reason: str | None, checked_at: datetime
+    ) -> AnalysisRecord:
+        record = self.get(analysis_id)
+        if record.status != AnalysisStatus.PUBLISHED:
+            raise InvalidStateError("Freshness can only be checked for published analyses")
+        if reason is None:
+            # No mutation when the baseline is still current. If a prior check already
+            # requested human review, that flag remains until a new review is completed.
+            return record
+        freshness = DocumentFreshnessStatus.NEEDS_REVIEW if reason else DocumentFreshnessStatus.ACTIVE
+        with self._connect() as connection:
+            if reason and record.freshness_reason == reason:
+                # A repeated, identical check is intentionally not a new audit event.
+                return record
+            connection.execute(
+                """UPDATE analyses SET freshness_status = ?, freshness_reason = ?,
+                   last_freshness_checked_at = ?, updated_at = ? WHERE id = ?""",
+                (freshness.value, reason, checked_at.isoformat(), utcnow().isoformat(), analysis_id),
+            )
+        return self.get(analysis_id)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
@@ -235,4 +287,11 @@ class SQLiteAnalysisStore:
             review_completed_at=datetime.fromisoformat(row["review_completed_at"])
             if row["review_completed_at"]
             else None,
+            document_urn=row["document_urn"],
+            published_at=datetime.fromisoformat(row["published_at"]) if row["published_at"] else None,
+            freshness_status=DocumentFreshnessStatus(row["freshness_status"])
+            if row["freshness_status"] else None,
+            freshness_reason=row["freshness_reason"],
+            last_freshness_checked_at=datetime.fromisoformat(row["last_freshness_checked_at"])
+            if row["last_freshness_checked_at"] else None,
         )
