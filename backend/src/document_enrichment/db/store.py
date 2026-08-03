@@ -44,38 +44,17 @@ class SQLiteAnalysisStore:
         self.database_path = database_path
 
     def initialize(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS analyses (
-                    id TEXT PRIMARY KEY,
-                    source_filename TEXT NOT NULL,
-                    source_sha256 TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    character_count INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    recommendations_json TEXT,
-                    final_selection_json TEXT,
-                    error_code TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    review_started_at TEXT,
-                    review_completed_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS review_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    analysis_id TEXT NOT NULL REFERENCES analyses(id),
-                    entity_type TEXT NOT NULL,
-                    urn TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    replaced_urn TEXT,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_review_actions_analysis_id
-                    ON review_actions(analysis_id);
-                """
-            )
+        """Verify that dbmate has applied the versioned schema before serving requests."""
+        if not self.database_path.exists():
+            raise RuntimeError("Database is not initialized; run `make migrate` before starting the API")
+        try:
+            with self._connect() as connection:
+                connection.execute("SELECT 1 FROM schema_migrations LIMIT 1")
+                connection.execute("SELECT 1 FROM analyses LIMIT 1")
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                "Database schema is not initialized; run `make migrate` before starting the API"
+            ) from exc
 
     def create(
         self, *, analysis_id: str, filename: str, content: str, sha256: str

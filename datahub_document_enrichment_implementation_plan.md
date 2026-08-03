@@ -22,7 +22,7 @@
 | 后端 | Python 3.11 + FastAPI + Pydantic | DataHub v1.6 Python SDK 对 Document 支持完整；本机也已有 Python 3.11 |
 | DataHub 读取 | GraphQL API | 适合批量获取 Domain、Tag、Owner、Dataset 及必要元数据，避免 N+1 请求 |
 | DataHub 写入 | `acryl-datahub==1.6.0.15` SDK v2 | 可直接创建原生 Document，并设置 domain、tags、owners、related assets |
-| 应用状态 | SQLite | MVP 只需保存分析、审核、发布和指标记录；无需再维护一个业务数据库服务 |
+| 应用状态 | SQLite + dbmate | MVP 只需保存分析、审核、发布和指标记录；SQLite 无需独立服务，dbmate 用版本化 SQL migration 保证 schema 可复现 |
 | LLM | 自定义 provider 接口，首个实现为 OpenAI-compatible structured output | 模型名、base URL、密钥可配置，同时控制 MVP 集成范围 |
 | Demo 数据 | 通过幂等 seed 脚本创建固定 URN 的 Jaffle Shop 元数据 | 复现稳定，避免把完整 PostgreSQL/dbt 管道变成 MVP 的前置工程 |
 | DataHub 性能 override | **当前不复制旧文件** | 本机 v1.6.0 Quickstart 已内置并运行 `ES_BULK_REFRESH_POLICY=NONE`；复制会形成重复且未被 Quickstart 自动加载的配置 |
@@ -526,6 +526,8 @@ agent/gate-8-evaluation-demo
 - Upload、Analyzing、Review、Publish Result 四个状态。
 - 推荐卡片、置信度、原因、证据、候选搜索、增删改。
 - 错误、空状态、键盘操作和基本响应式布局。
+- 发布结果/已发布文档显示 `ACTIVE`、`NEEDS_REVIEW`、`STALE`、`SUPERSEDED` 或 `ARCHIVED` 状态、最近人工复核时间及触发原因；不在浏览器自动修改文档正文。
+- 对 `NEEDS_REVIEW` 文档显示来源版本或关联 Dataset 的变更证据，并允许用户发起一次新的审核流程。
 
 **产物**
 
@@ -540,6 +542,7 @@ agent/gate-8-evaluation-demo
 - 全流程仅使用键盘也能完成，表单控件有 label 和可见 focus。
 - Playwright 从上传到保存审核结果通过。
 - 正常 catalog 规模下，候选搜索不会造成每次按键都全量请求 DataHub。
+- 状态为 `NEEDS_REVIEW` 或 `STALE` 的文档有可见原因；用户可以进入重新审核，但不能在没有确认的情况下覆盖原文或关联。
 
 ### 阶段 7：安全、幂等地发布到 DataHub
 
@@ -549,6 +552,9 @@ agent/gate-8-evaluation-demo
 - 执行 UNPUBLISHED → 回读校验 → PUBLISHED 流程。
 - 记录 Document URN，处理重复点击和部分失败重试。
 - 生成 DataHub UI deep links。
+- 发布时保存来源内容 hash、人工复核时间，以及每个已确认 Related Dataset 的只读基线快照（URN、弃用状态、schema/description fingerprint、Domain、Owner、Tags）。
+- 提供只读 freshness check：发现来源新版本、关联 Dataset 删除/弃用、被正文引用的字段变更，或关联 metadata 发生显著改变时，将文档标记为 `NEEDS_REVIEW`；不得自动修改正文、关系或删除 Document。
+- 对同一 Dataset/主题的高相似文档只创建“可能冲突”审核候选；指标公式、口径等冲突必须由用户确认，不能由 embedding 或 LLM 自动裁决。
 
 **产物**
 
@@ -563,6 +569,8 @@ agent/gate-8-evaluation-demo
 - 模拟中途失败时文档保持 UNPUBLISHED，重试后可完成。
 - DataHub 搜索能找到正文关键字。
 - 至少一个相关 Dataset 的 DataHub 页面能看到该 Document。
+- 关联 Dataset 的确定性变化会产生包含具体差异的 `NEEDS_REVIEW` 记录；无变化的重复检查不产生新审计记录。
+- `STALE`、`ARCHIVED` 文档在后续 RAG 集成中默认降权或排除；`SUPERSEDED` 文档保留历史可追溯性并链接替代版本。
 
 ### 阶段 8：质量评估、性能与演示封装
 

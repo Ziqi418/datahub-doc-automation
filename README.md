@@ -5,11 +5,13 @@ Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT
 ## Quick start
 
 1. Copy `.env.example` to `.env` and point it at a running local DataHub v1.6.0 instance.
-2. Install the backend dependencies: `make install`.
-3. Validate local fixtures without DataHub: `cd backend && uv run python ../scripts/verify_demo_data.py --offline`.
-4. Seed only the fixed Jaffle Shop namespace: `make seed-demo`.
-5. Verify seed data via GraphQL: `make verify-demo-data`.
-6. Configure `LLM_API_KEY` and `LLM_MODEL`, then run the API with `make run`.
+2. Install dbmate: `brew install dbmate`.
+3. Install the backend dependencies: `make install`.
+4. Apply the local versioned schema: `make migrate`.
+5. Validate local fixtures without DataHub: `cd backend && uv run python ../scripts/verify_demo_data.py --offline`.
+6. Seed only the fixed Jaffle Shop namespace: `make seed-demo`.
+7. Verify seed data via GraphQL: `make verify-demo-data`.
+8. Configure `LLM_API_KEY` and `LLM_MODEL`, then run the API with `make run`.
 
 `make seed-demo` is idempotent and only writes the `jaffle_shop` platform datasets plus the fixed `finance`, `customer`, `operations`, tag, and group demo URNs. It does not delete or modify unrelated DataHub assets.
 
@@ -19,11 +21,14 @@ Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT
 - DataHub catalog requests are read-only GraphQL calls with a five-minute cache and bounded result lists.
 - LLM output is schema-validated and checked again against candidates from DataHub before it can become a recommendation.
 - Phase 5 has no DataHub publishing endpoint. Saving an audit/review never writes a DataHub Document.
+- The SQLite schema is versioned under `backend/db/migrations`; run `make migrate` before the API starts.
 
 ## Local checks
 
 ```sh
 make lint
 make test
+make migrate
+make migration-status
 make check-env       # requires running DataHub
 ```

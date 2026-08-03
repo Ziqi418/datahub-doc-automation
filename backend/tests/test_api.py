@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from document_enrichment.api.app import create_app, get_gateway, get_llm_provider
@@ -10,7 +14,9 @@ from document_enrichment.recommendation.rules import recommend_rules
 
 
 def _client(tmp_path, in_memory_catalog):
-    app = create_app(Settings(database_path=tmp_path / "app.db"))
+    database_path = tmp_path / "app.db"
+    _migrate(database_path)
+    app = create_app(Settings(database_path=database_path))
     rule = recommend_rules(
         "# Test\n```sql\nselect * from fct_orders\n```", "test.md", in_memory_catalog.catalog
     )
@@ -23,6 +29,19 @@ def _client(tmp_path, in_memory_catalog):
         )
     )
     return TestClient(app)
+
+
+def _migrate(database_path: Path) -> None:
+    migrations_dir = Path(__file__).resolve().parents[1] / "db" / "migrations"
+    environment = os.environ | {
+        "DBMATE_DATABASE_URL": f"sqlite:{database_path}",
+        "DBMATE_MIGRATIONS_DIR": str(migrations_dir),
+    }
+    subprocess.run(
+        ["dbmate", "--env", "DBMATE_DATABASE_URL", "--no-dump-schema", "up"],
+        check=True,
+        env=environment,
+    )
 
 
 def test_upload_validation_does_not_create_analysis(tmp_path, in_memory_catalog) -> None:

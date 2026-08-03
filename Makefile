@@ -1,7 +1,7 @@
 UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
 
-.PHONY: install test lint run seed-demo verify-demo-data check-env eval-rules test-llm eval-llm
+.PHONY: install test lint run migrate migration-status new-migration seed-demo verify-demo-data check-env eval-rules test-llm eval-llm
 
 install:
 	cd backend && uv sync --extra dev --extra datahub
@@ -14,6 +14,17 @@ lint:
 
 run:
 	cd backend && uv run uvicorn document_enrichment.api.app:app --reload --port 8000
+
+migrate:
+	mkdir -p backend/data
+	cd backend && set -a && test ! -f ../.env || . ../.env; set +a; DBMATE_DATABASE_URL="$${DBMATE_DATABASE_URL:-sqlite:./data/document_enrichment.db}" dbmate --env DBMATE_DATABASE_URL --migrations-dir db/migrations --no-dump-schema up
+
+migration-status:
+	cd backend && set -a && test ! -f ../.env || . ../.env; set +a; DBMATE_DATABASE_URL="$${DBMATE_DATABASE_URL:-sqlite:./data/document_enrichment.db}" dbmate --env DBMATE_DATABASE_URL --migrations-dir db/migrations status
+
+new-migration:
+	@test -n "$(name)" || (echo "Usage: make new-migration name=add_publish_audit" && exit 1)
+	cd backend && dbmate --migrations-dir db/migrations new "$(name)"
 
 seed-demo:
 	cd backend && uv run --extra datahub python ../scripts/seed_demo.py
