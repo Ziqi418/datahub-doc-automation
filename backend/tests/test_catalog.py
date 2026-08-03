@@ -67,3 +67,75 @@ async def test_graphql_errors_are_not_mapped_to_empty_catalog(tmp_path) -> None:
     gateway = GraphQLDataHubCatalogGateway(Settings(database_path=tmp_path / "test.db"), client)
     with pytest.raises(CatalogUnavailableError):
         await gateway.get_snapshot()
+
+
+@pytest.mark.asyncio
+async def test_malformed_corp_group_results_do_not_block_catalog(tmp_path) -> None:
+    """DataHub v1.6 can null the entire search result for one corrupt CorpGroup."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = __import__("json").loads(request.content)
+        input_ = payload["variables"]["input"]
+        entity_type, start, count = input_["type"], input_["start"], input_["count"]
+        if entity_type == "CORP_GROUP":
+            if start <= 11 < start + count:
+                return httpx.Response(
+                    200,
+                    json={
+                        "errors": [
+                            {
+                                "message": "null entity",
+                                "extensions": {"classification": "NullValueInNonNullableField"},
+                            }
+                        ]
+                    },
+                )
+            rows = [
+                {
+                    "entity": {
+                        "urn": f"urn:li:corpgroup:team-{index}",
+                        "type": "CORP_GROUP",
+                        "name": f"team-{index}",
+                        "properties": {"displayName": f"team-{index}"},
+                    }
+                }
+                for index in range(start, min(start + count, 13))
+            ]
+            return httpx.Response(200, json={"data": {"search": {"total": 13, "searchResults": rows}}})
+
+        if entity_type == "CORP_USER":
+            entity = {
+                "urn": "urn:li:corpuser:valid-user",
+                "type": "CORP_USER",
+                "username": "valid-user",
+                "properties": {"displayName": "valid-user"},
+            }
+            return httpx.Response(200, json={"data": {"search": {"total": 1, "searchResults": [{"entity": entity}]}}})
+        if entity_type in {"DOMAIN", "TAG"}:
+            entity = {
+                "urn": f"urn:li:{entity_type.lower()}:one",
+                "type": entity_type,
+                "properties": {"name": "one"},
+            }
+        else:
+            entity = {
+                "urn": "urn:li:dataset:(urn:li:dataPlatform:test,one,PROD)",
+                "type": "DATASET",
+                "name": "one",
+                "properties": {"name": "one"},
+                "schemaMetadata": {"fields": []},
+                "ownership": {"owners": []},
+                "domain": {},
+                "tags": {},
+                "deprecation": {},
+            }
+        return httpx.Response(200, json={"data": {"search": {"total": 1, "searchResults": [{"entity": entity}]}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    gateway = GraphQLDataHubCatalogGateway(Settings(database_path=tmp_path / "test.db"), client)
+    snapshot = await gateway.get_snapshot()
+    urns = {owner.urn for owner in snapshot.owners}
+    assert "urn:li:corpuser:valid-user" in urns
+    assert "urn:li:corpgroup:team-10" in urns
+    assert "urn:li:corpgroup:team-11" not in urns
+    assert "urn:li:corpgroup:team-12" in urns

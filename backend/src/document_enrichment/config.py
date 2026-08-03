@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     )
 
     datahub_gms_url: AnyHttpUrl = "http://localhost:8080"
+    datahub_ui_url: AnyHttpUrl = "http://localhost:9002"
     datahub_graphql_url: AnyHttpUrl = "http://localhost:8080/api/graphql"
     datahub_token: str | None = None
     database_path: Path = Path("./data/document_enrichment.db")

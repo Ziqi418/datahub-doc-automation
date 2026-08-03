@@ -1,6 +1,6 @@
 # DataHub Document Enrichment Agent
 
-Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT document. This repository implements the demo metadata, read-only catalog, deterministic retrieval, constrained LLM ranking, and workflow/review API (implementation-plan phases 1–5). DataHub Document publishing and the full review UI intentionally begin in later phases.
+Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT document. This repository implements the demo metadata, read-only catalog, deterministic retrieval, constrained LLM ranking, workflow/review API, and safe DataHub Document publishing (implementation-plan phases 1–5 and 7).
 
 ## Quick start
 
@@ -20,7 +20,8 @@ Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT
 - Uploads accept only UTF-8 `.md` / `.txt`, max 256 KiB and 30,000 characters.
 - DataHub catalog requests are read-only GraphQL calls with a five-minute cache and bounded result lists.
 - LLM output is schema-validated and checked again against candidates from DataHub before it can become a recommendation.
-- Phase 5 has no DataHub publishing endpoint. Saving an audit/review never writes a DataHub Document.
+- Publishing only starts after a saved review. The publisher writes an `UNPUBLISHED` native Document, verifies every selected field by read-back, then publishes it using the same stable URN on retries.
+- `POST /api/analyses/{id}/freshness` is read-only against DataHub. It marks a locally tracked document `NEEDS_REVIEW` when a related Dataset is missing or its schema/metadata baseline changes; it never rewrites or deletes the Document.
 - The SQLite schema is versioned under `backend/db/migrations`; run `make migrate` before the API starts.
 
 ## Local checks

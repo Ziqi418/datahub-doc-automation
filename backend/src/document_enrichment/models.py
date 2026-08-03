@@ -24,6 +24,14 @@ class AnalysisStatus(StrEnum):
     PUBLISHED = "PUBLISHED"
 
 
+class DocumentFreshnessStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    STALE = "STALE"
+    SUPERSEDED = "SUPERSEDED"
+    ARCHIVED = "ARCHIVED"
+
+
 class Evidence(BaseModel):
     kind: str
     matched_text: str
@@ -55,6 +63,7 @@ class Dataset(CatalogEntity):
     owner_urns: list[str] = Field(default_factory=list)
     domain_urn: str | None = None
     tag_urns: list[str] = Field(default_factory=list)
+    deprecated: bool = False
 
 
 class CatalogSnapshot(BaseModel):
@@ -125,6 +134,11 @@ class AnalysisRecord(BaseModel):
     updated_at: datetime
     review_started_at: datetime | None = None
     review_completed_at: datetime | None = None
+    document_urn: str | None = None
+    published_at: datetime | None = None
+    freshness_status: DocumentFreshnessStatus | None = None
+    freshness_reason: str | None = None
+    last_freshness_checked_at: datetime | None = None
 
 
 class UploadResponse(BaseModel):
@@ -147,3 +161,16 @@ class CatalogRefreshResponse(BaseModel):
     tags: int
     owners: int
     datasets: int
+
+
+class PublishResponse(BaseModel):
+    analysis: AnalysisRecord
+    document_urn: str
+    datahub_document_url: str
+    related_dataset_urls: list[str]
+
+
+class FreshnessCheckResponse(BaseModel):
+    analysis: AnalysisRecord
+    changed: bool
+    differences: list[str] = Field(default_factory=list)

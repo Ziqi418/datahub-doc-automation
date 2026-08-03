@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Iterable
 from typing import Any, Protocol
@@ -13,6 +14,13 @@ from document_enrichment.models import CatalogSnapshot, Dataset, Domain, Owner, 
 
 class CatalogUnavailableError(RuntimeError):
     """The catalog could not be obtained from DataHub."""
+
+
+class _MalformedSearchResultError(CatalogUnavailableError):
+    """DataHub returned a null entity for one otherwise valid search page."""
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DataHubCatalogGateway(Protocol):
@@ -43,6 +51,7 @@ query SearchCatalog($input: SearchInput!) {
           }
           domain { domain { urn } }
           tags { tags { tag { urn } } }
+          deprecation { deprecated }
         }
         ... on Domain { properties { name description } }
         ... on Tag { properties { name description } }
@@ -133,18 +142,9 @@ class GraphQLDataHubCatalogGateway:
         merged: list[dict[str, Any]] = []
         for entity_type in entity_types:
             start = 0
+            page_size = 10 if entity_type == "CORP_GROUP" else self.PAGE_SIZE
             while True:
-                payload = await self._execute(
-                    {
-                        "input": {
-                            "type": entity_type,
-                            "query": "*",
-                            "start": start,
-                            "count": self.PAGE_SIZE,
-                        }
-                    }
-                )
-                result = payload.get("data", {}).get("search")
+                result = await self._search_page(entity_type, start, page_size)
                 if not isinstance(result, dict):
                     raise CatalogUnavailableError("DataHub GraphQL search returned no result")
                 rows = result.get("searchResults") or []
@@ -154,10 +154,37 @@ class GraphQLDataHubCatalogGateway:
                 # `start` is an offset into the search result set, not the number
                 # of entity nodes successfully mapped. Advance by requested page
                 # size so a partial page cannot cause duplicates or an infinite loop.
-                start += self.PAGE_SIZE
+                start += page_size
                 if not rows or start >= int(result.get("total") or 0):
                     break
         return merged
+
+    async def _search_page(self, entity_type: str, start: int, count: int) -> dict[str, Any] | None:
+        variables = {
+            "input": {"type": entity_type, "query": "*", "start": start, "count": count}
+        }
+        try:
+            payload = await self._execute(variables)
+        except _MalformedSearchResultError:
+            if entity_type != "CORP_GROUP":
+                raise
+            return await self._recover_corp_group_page(start, count)
+        result = payload.get("data", {}).get("search")
+        return result if isinstance(result, dict) else None
+
+    async def _recover_corp_group_page(self, start: int, count: int) -> dict[str, Any]:
+        """Binary-split only malformed CorpGroup pages, retaining valid groups."""
+        if count == 1:
+            LOGGER.warning("Skipping malformed DataHub CorpGroup search result at offset %s", start)
+            return {"total": start + 1, "searchResults": []}
+        left_count = count // 2
+        left = await self._search_page("CORP_GROUP", start, left_count)
+        right = await self._search_page("CORP_GROUP", start + left_count, count - left_count)
+        assert left is not None and right is not None
+        return {
+            "total": max(int(left.get("total") or 0), int(right.get("total") or 0)),
+            "searchResults": [*(left.get("searchResults") or []), *(right.get("searchResults") or [])],
+        }
 
     async def _execute(self, variables: dict[str, Any]) -> dict[str, Any]:
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -176,6 +203,14 @@ class GraphQLDataHubCatalogGateway:
                 f"DataHub GraphQL request failed: {type(exc).__name__}"
             ) from exc
         if body.get("errors"):
+            errors = body["errors"]
+            if all(
+                isinstance(error, dict)
+                and error.get("extensions", {}).get("classification")
+                == "NullValueInNonNullableField"
+                for error in errors
+            ):
+                raise _MalformedSearchResultError("DataHub GraphQL returned malformed search entities")
             raise CatalogUnavailableError("DataHub GraphQL returned errors")
         return body
 
@@ -217,6 +252,7 @@ class GraphQLDataHubCatalogGateway:
         ownership = row.get("ownership") if isinstance(row.get("ownership"), dict) else {}
         domain = row.get("domain") if isinstance(row.get("domain"), dict) else {}
         tags = row.get("tags") if isinstance(row.get("tags"), dict) else {}
+        deprecation = row.get("deprecation") if isinstance(row.get("deprecation"), dict) else {}
         return Dataset(
             urn=row["urn"],
             name=props.get("name") or row.get("name") or row["urn"],
@@ -236,4 +272,5 @@ class GraphQLDataHubCatalogGateway:
             tag_urns=[
                 tag["tag"]["urn"] for tag in tags.get("tags", []) if tag.get("tag", {}).get("urn")
             ],
+            deprecated=bool(deprecation.get("deprecated", False)),
         )

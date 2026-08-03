@@ -572,6 +572,42 @@ agent/gate-8-evaluation-demo
 - 关联 Dataset 的确定性变化会产生包含具体差异的 `NEEDS_REVIEW` 记录；无变化的重复检查不产生新审计记录。
 - `STALE`、`ARCHIVED` 文档在后续 RAG 集成中默认降权或排除；`SUPERSEDED` 文档保留历史可追溯性并链接替代版本。
 
+### 阶段 7.5：发布冲突审核与 Schema Freshness 精化
+
+**前置条件**
+
+- 阶段 7 已发布原生 DataHub Document，并保存关联 Dataset 的基线快照。
+- DataHub v1.6 的 GraphQL `searchDocuments`、`SchemaField.nativeDataType` 与 `SchemaField.nullable` 可用。
+
+**工作内容**
+
+- 在真正写入 DataHub 前，使用 `searchDocuments` 按最终选择的 Related Datasets、Domain 与标题关键词召回最多 20 篇既有 Document；排除当前 Analysis 的稳定 Document URN。
+- 仅以确定性信号生成“可能冲突”候选：Dataset 重合、标题词元相似度、正文关键词、字段或 SQL 表引用重合。Embedding/LLM 未来可作为召回信号，但不得自动判定冲突已解决。
+- 把候选的 Document URN、标题、关联 Dataset、分数、命中证据、检测器版本与检测时间保存到 SQLite，并在审核 UI 显示。
+- 指标、口径、公式等高风险候选必须由用户显式确认后才能发布；普通相似候选也必须可见。系统不得自动合并、替换、归档或删除既有 Document。
+- 为 Analysis 状态机增加明确的冲突审核状态（建议 `CONFLICT_REVIEW`），并提供确认后返回 `APPROVED` 的 API；未确认时 publish 返回 `409` 且不写 DataHub。
+- 扩展 Catalog Dataset schema 模型：保留当前 `schema_fields: list[str]` 作为规则层的轻量投影，增加结构化 field snapshot（field path、native data type、nullable、description）。
+- 发布时对每个 Related Dataset 保存 canonical、稳定排序的 schema fingerprint，以及 description、Domain、Owners、Tags、deprecation 和正文实际引用字段的快照。
+- Freshness check 比较 schema fingerprint，并输出具体差异：字段新增/删除、类型、nullable 或 description 变化；正文引用字段的变化必须明确标识。字段顺序变化不得产生差异。
+- 无变化的重复 freshness check 不写新审计记录；检测到变化仅将本地 Document 状态标为 `NEEDS_REVIEW`，不自动重写正文、关系或 DataHub Document。
+
+**产物**
+
+- `DocumentConflictGateway` / DataHub GraphQL adapter，以及冲突候选持久化与审核 API。
+- 扩展后的 Dataset schema field model、发布 baseline 和可读的 freshness difference payload。
+- UI 中的冲突确认区块与字段级 freshness evidence。
+- mock contract tests、状态机测试和本地 DataHub v1.6 live integration test。
+
+**Gate 7.5 通过标准**
+
+- 同一 Dataset 且高相似的 Document 会生成可审查候选；当前 Document URN 不会成为自身候选。
+- 不同 Dataset 的相似文本不会被错误地阻塞；候选结果稳定且包含具体证据。
+- 未确认高风险指标/口径候选时 publish 返回 `409`，且没有 DataHub 写操作；用户确认后才可进入阶段 7 的发布流程。
+- Document 冲突检测不自动裁决、修改或删除既有 Document。
+- schema field 的顺序变化不触发 freshness；`nativeDataType`、`nullable`、字段描述及引用字段删除/变化会产生包含旧值和新值的 `NEEDS_REVIEW` 记录。
+- Dataset 的 description、Domain、Owner、Tag、deprecation 变化继续产生可解释差异；无变化重复检查不新增审计记录。
+- 全部 unit/contract tests 通过，并以本地 DataHub v1.6 完成一次从冲突审核到发布、一次字段类型变更到 freshness evidence 的 live 验收。
+
 ### 阶段 8：质量评估、性能与演示封装
 
 **工作内容**

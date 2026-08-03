@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -25,7 +26,9 @@ from document_enrichment.db.store import (
     AnalysisNotFoundError,
     InvalidStateError,
     SQLiteAnalysisStore,
+    utcnow,
 )
+from document_enrichment.extraction.document import extract_document
 from document_enrichment.models import (
     AnalysisRecord,
     AnalysisStatus,
@@ -34,11 +37,18 @@ from document_enrichment.models import (
     CatalogSearchResponse,
     Dataset,
     EntityType,
+    FreshnessCheckResponse,
     Owner,
+    PublishResponse,
     RecommendationSet,
     ReviewAction,
     ReviewSelection,
     UploadResponse,
+)
+from document_enrichment.publishing import (
+    DataHubDocumentPublisher,
+    DocumentPublisher,
+    PublishVerificationError,
 )
 from document_enrichment.recommendation.llm import (
     LLMProvider,
@@ -75,6 +85,10 @@ def get_llm_provider(request: Request) -> LLMProvider:
     return provider
 
 
+def get_publisher(request: Request) -> DocumentPublisher:
+    return request.app.state.publisher
+
+
 def create_app(
     settings: Settings | None = None, catalog_gateway: DataHubCatalogGateway | None = None
 ) -> FastAPI:
@@ -87,6 +101,7 @@ def create_app(
         store.initialize()
         app.state.store = store
         app.state.catalog_gateway = gateway
+        app.state.publisher = DataHubDocumentPublisher(app_settings)
         try:
             app.state.llm_provider = OpenAICompatibleProvider(app_settings)
         except ProviderError:
@@ -240,7 +255,123 @@ def create_app(
             datasets=len(snapshot.datasets),
         )
 
+    @app.post("/api/analyses/{analysis_id}/publish", response_model=PublishResponse)
+    async def publish_analysis(
+        analysis_id: str,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+        publisher: Annotated[DocumentPublisher, Depends(get_publisher)],
+    ) -> PublishResponse:
+        try:
+            record = store.get(analysis_id)
+            if record.status == AnalysisStatus.PUBLISHED:
+                return _publish_response(record, app_settings)
+            record = store.transition(analysis_id, AnalysisStatus.PUBLISHING)
+            if record.final_selection is None:
+                raise InvalidStateError("A reviewed selection is required before publishing")
+            snapshot = await gateway.get_snapshot()
+            _validate_selection(record.final_selection, snapshot)
+            published = await publisher.publish(
+                analysis_id=record.id, filename=record.source_filename,
+                source_sha256=record.source_sha256, content=store.content(record.id),
+                selection=record.final_selection,
+            )
+            updated = store.save_publish_result(
+                record.id, document_urn=published.urn,
+                dataset_baseline_json=json.dumps(
+                    _dataset_baseline(record.final_selection, snapshot, store.content(record.id)), sort_keys=True
+                ),
+                published_at=utcnow(),
+            )
+            return _publish_response(updated, app_settings)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (PublishVerificationError, Exception) as exc:
+            # Preserve the UNPUBLISHED DataHub entity for a safe retry; never delete it automatically.
+            try:
+                store.save_publish_failure(analysis_id, type(exc).__name__)
+            except (AnalysisNotFoundError, InvalidStateError):
+                pass
+            LOGGER.warning("publish failed for analysis %s: %s", analysis_id, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="DataHub document publish failed; retry is safe") from exc
+
+    @app.post("/api/analyses/{analysis_id}/freshness", response_model=FreshnessCheckResponse)
+    async def check_freshness(
+        analysis_id: str,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+    ) -> FreshnessCheckResponse:
+        try:
+            record = store.get(analysis_id)
+            if not record.document_urn:
+                raise InvalidStateError("Freshness can only be checked after publishing")
+            baseline = _read_dataset_baseline(store, analysis_id)
+            snapshot = await gateway.get_snapshot()
+            differences = _freshness_differences(baseline, snapshot)
+            updated = store.save_freshness_check(
+                analysis_id, reason="; ".join(differences) if differences else None, checked_at=utcnow()
+            )
+            return FreshnessCheckResponse(analysis=updated, changed=bool(differences), differences=differences)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     return app
+
+
+def _publish_response(record: AnalysisRecord, settings: Settings) -> PublishResponse:
+    assert record.document_urn
+    base = str(settings.datahub_ui_url).rstrip("/")
+    return PublishResponse(
+        analysis=record, document_urn=record.document_urn,
+        datahub_document_url=f"{base}/document/{record.document_urn}",
+        related_dataset_urls=[f"{base}/dataset/{urn}" for urn in (record.final_selection.dataset_urns if record.final_selection else [])],
+    )
+
+
+def _dataset_baseline(selection: ReviewSelection, snapshot, content: str) -> list[dict[str, object]]:
+    wanted = set(selection.dataset_urns)
+    mentioned_tokens = extract_document(content).tokens
+    return [
+        {"urn": item.urn, "description": item.description, "schema_fields": sorted(item.schema_fields),
+         "domain_urn": item.domain_urn, "owner_urns": sorted(item.owner_urns), "tag_urns": sorted(item.tag_urns),
+         "deprecated": item.deprecated,
+         "referenced_fields": sorted(
+             field for field in item.schema_fields if field.casefold() in mentioned_tokens
+         )}
+        for item in snapshot.datasets if item.urn in wanted
+    ]
+
+
+def _read_dataset_baseline(store: SQLiteAnalysisStore, analysis_id: str) -> list[dict[str, object]]:
+    with store._connect() as connection:  # Store owns the SQLite boundary; no DataHub mutation occurs here.
+        row = connection.execute("SELECT dataset_baseline_json FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+    return json.loads(row["dataset_baseline_json"] or "[]")
+
+
+def _freshness_differences(baseline: list[dict[str, object]], snapshot) -> list[str]:
+    current = {item.urn: item for item in snapshot.datasets}
+    differences: list[str] = []
+    for previous in baseline:
+        urn = str(previous["urn"])
+        item = current.get(urn)
+        if item is None:
+            differences.append(f"Related dataset no longer exists: {urn}")
+            continue
+        if item.deprecated and not previous.get("deprecated", False):
+            differences.append(f"Related dataset is now deprecated: {urn}")
+        fields = sorted(item.schema_fields)
+        removed = sorted(set(previous.get("referenced_fields", [])) - set(fields))
+        if removed:
+            differences.append(f"{urn} removed referenced schema fields: {', '.join(removed)}")
+        for key, actual in (("description", item.description), ("domain_urn", item.domain_urn),
+                            ("owner_urns", sorted(item.owner_urns)), ("tag_urns", sorted(item.tag_urns))):
+            if previous[key] != actual:
+                differences.append(f"{urn} changed {key}")
+    return differences
 
 
 def _validate_selection(selection: ReviewSelection, snapshot) -> None:
