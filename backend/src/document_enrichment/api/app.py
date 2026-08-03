@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from document_enrichment.config import Settings, get_settings
@@ -26,9 +29,12 @@ from document_enrichment.db.store import (
 from document_enrichment.models import (
     AnalysisRecord,
     AnalysisStatus,
+    CatalogRefreshResponse,
     CatalogSearchItem,
     CatalogSearchResponse,
+    Dataset,
     EntityType,
+    Owner,
     RecommendationSet,
     ReviewAction,
     ReviewSelection,
@@ -43,6 +49,7 @@ from document_enrichment.recommendation.llm import (
 from document_enrichment.recommendation.rules import recommend_rules
 
 LOGGER = logging.getLogger(__name__)
+CatalogEntityType = Literal["domains", "tags", "owners", "datasets"]
 
 
 class ReviewResponse(BaseModel):
@@ -68,14 +75,16 @@ def get_llm_provider(request: Request) -> LLMProvider:
     return provider
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, catalog_gateway: DataHubCatalogGateway | None = None
+) -> FastAPI:
     app_settings = settings or get_settings()
+    gateway = catalog_gateway or GraphQLDataHubCatalogGateway(app_settings)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = SQLiteAnalysisStore(app_settings.database_path)
         store.initialize()
-        gateway = GraphQLDataHubCatalogGateway(app_settings)
         app.state.store = store
         app.state.catalog_gateway = gateway
         try:
@@ -83,10 +92,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ProviderError:
             app.state.llm_provider = None
         yield
-        await gateway.aclose()
+        close = getattr(gateway, "aclose", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
         provider = app.state.llm_provider
         if provider and hasattr(provider, "aclose"):
-            await provider.aclose()
+            result = provider.aclose()
+            if inspect.isawaitable(result):
+                await result
 
     app = FastAPI(title="DataHub Document Enrichment API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -97,16 +112,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Content-Type"],
     )
 
+    @app.exception_handler(CatalogUnavailableError)
+    async def catalog_unavailable(_: Request, __: CatalogUnavailableError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": "DataHub catalog unavailable"})
+
     @app.get("/api/health/live")
     async def live() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/api/health/ready")
     async def ready() -> dict[str, str]:
-        try:
-            await get_gateway_from_app(app).get_snapshot()
-        except CatalogUnavailableError as exc:
-            raise HTTPException(status_code=503, detail="DataHub catalog unavailable") from exc
+        await gateway.get_snapshot()
         return {"status": "ok", "database": "ok", "datahub": "ok"}
 
     @app.post("/api/analyses", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
@@ -115,8 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
     ) -> UploadResponse:
         filename = Path(file.filename or "").name
-        extension = Path(filename).suffix.casefold()
-        if extension not in {".md", ".txt"}:
+        if Path(filename).suffix.casefold() not in {".md", ".txt"}:
             raise HTTPException(status_code=415, detail="Only .md and .txt files are supported")
         raw = await file.read(app_settings.max_upload_bytes + 1)
         if len(raw) > app_settings.max_upload_bytes:
@@ -129,13 +144,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="File must not be empty")
         if len(content) > app_settings.max_document_characters:
             raise HTTPException(status_code=413, detail="Document exceeds 30,000 character limit")
-        record = store.create(
-            analysis_id=str(uuid4()),
-            filename=filename,
-            content=content,
-            sha256=hashlib.sha256(raw).hexdigest(),
+        return UploadResponse(
+            analysis=store.create(
+                analysis_id=str(uuid4()),
+                filename=filename,
+                content=content,
+                sha256=hashlib.sha256(raw).hexdigest(),
+            )
         )
-        return UploadResponse(analysis=record)
 
     @app.post("/api/analyses/{analysis_id}/recommend", response_model=AnalysisRecord)
     async def recommend_analysis(
@@ -148,9 +164,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record = store.transition(analysis_id, AnalysisStatus.ANALYZING)
             content = store.content(analysis_id)
             snapshot = await gateway.get_snapshot()
-            rules = recommend_rules(content, record.source_filename, snapshot)
             recommendations = await recommend_with_llm(
-                provider=provider, text=content, catalog=snapshot, rule_recommendations=rules
+                provider=provider,
+                text=content,
+                catalog=snapshot,
+                rule_recommendations=recommend_rules(content, record.source_filename, snapshot),
             )
             return store.save_recommendations(analysis_id, recommendations)
         except AnalysisNotFoundError as exc:
@@ -158,13 +176,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (CatalogUnavailableError, ProviderError) as exc:
-            # An explicit failure state permits a safe retry without any DataHub write.
             try:
-                store.transition(analysis_id, AnalysisStatus.ANALYSIS_FAILED, error_code=type(exc).__name__)
+                store.transition(
+                    analysis_id, AnalysisStatus.ANALYSIS_FAILED, error_code=type(exc).__name__
+                )
             except (AnalysisNotFoundError, InvalidStateError):
                 pass
-            LOGGER.warning("recommendation failed for analysis %s: %s", analysis_id, type(exc).__name__)
-            raise HTTPException(status_code=503, detail="Catalog or LLM recommendation unavailable") from exc
+            LOGGER.warning(
+                "recommendation failed for analysis %s: %s", analysis_id, type(exc).__name__
+            )
+            raise HTTPException(
+                status_code=503, detail="Catalog or LLM recommendation unavailable"
+            ) from exc
 
     @app.get("/api/analyses/{analysis_id}", response_model=AnalysisRecord)
     async def get_analysis(
@@ -184,8 +207,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> ReviewResponse:
         try:
             record = store.get(analysis_id)
-            snapshot = await gateway.get_snapshot()
-            _validate_selection(selection, snapshot)
+            _validate_selection(selection, await gateway.get_snapshot())
             actions = _review_actions(record.recommendations or RecommendationSet(), selection)
             updated = store.save_review(analysis_id, selection, actions)
             return ReviewResponse(analysis=updated, actions=store.review_actions(analysis_id))
@@ -193,41 +215,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except CatalogUnavailableError as exc:
-            raise HTTPException(status_code=503, detail="DataHub catalog unavailable") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/catalog/{entity_type}", response_model=CatalogSearchResponse)
     async def search_catalog(
-        entity_type: str,
+        entity_type: CatalogEntityType,
         gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
-        q: str = "",
-        limit: int = Query(default=20, ge=1, le=20),
+        q: Annotated[str, Query(max_length=200)] = "",
+        limit: Annotated[int, Query(ge=1, le=20)] = 20,
     ) -> CatalogSearchResponse:
-        if entity_type not in {"domains", "tags", "owners", "datasets"}:
-            raise HTTPException(status_code=404, detail="Unknown catalog entity type")
-        try:
-            items = await gateway.search(entity_type, q, limit)
-            return CatalogSearchResponse(items=[_catalog_item(item) for item in items], limit=limit)
-        except CatalogUnavailableError as exc:
-            raise HTTPException(status_code=503, detail="DataHub catalog unavailable") from exc
+        items = await gateway.search(entity_type, q, limit)
+        return CatalogSearchResponse(items=[_catalog_item(item) for item in items], limit=limit)
 
-    @app.post("/api/catalog/refresh", response_model=dict[str, int])
+    @app.post("/api/catalog/refresh", response_model=CatalogRefreshResponse)
     async def refresh_catalog(
         gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
-    ) -> dict[str, int]:
-        try:
-            snapshot = await gateway.get_snapshot(force_refresh=True)
-            return {"domains": len(snapshot.domains), "tags": len(snapshot.tags), "owners": len(snapshot.owners), "datasets": len(snapshot.datasets)}
-        except CatalogUnavailableError as exc:
-            raise HTTPException(status_code=503, detail="DataHub catalog unavailable") from exc
+    ) -> CatalogRefreshResponse:
+        snapshot = await gateway.get_snapshot(force_refresh=True)
+        return CatalogRefreshResponse(
+            domains=len(snapshot.domains),
+            tags=len(snapshot.tags),
+            owners=len(snapshot.owners),
+            datasets=len(snapshot.datasets),
+        )
 
     return app
-
-
-def get_gateway_from_app(app: FastAPI) -> DataHubCatalogGateway:
-    return app.state.catalog_gateway
 
 
 def _validate_selection(selection: ReviewSelection, snapshot) -> None:
@@ -253,25 +266,41 @@ def _catalog_item(item: object) -> CatalogSearchItem:
         urn=item.urn,
         name=item.name,
         description=item.description,
-        qualified_name=getattr(item, "qualified_name", None),
-        owner_type=getattr(item, "owner_type", None),
-        title=getattr(item, "title", None),
+        qualified_name=item.qualified_name if isinstance(item, Dataset) else None,
+        owner_type=item.owner_type if isinstance(item, Owner) else None,
+        title=item.title if isinstance(item, Owner) else None,
     )
 
 
-def _review_actions(recommendations: RecommendationSet, selection: ReviewSelection) -> list[ReviewAction]:
+def _review_actions(
+    recommendations: RecommendationSet, selection: ReviewSelection
+) -> list[ReviewAction]:
     now = datetime.now(UTC)
     pairs = [
-        (EntityType.DOMAIN, [recommendations.domain.urn] if recommendations.domain else [], [selection.domain_urn] if selection.domain_urn else []),
+        (
+            EntityType.DOMAIN,
+            [recommendations.domain.urn] if recommendations.domain else [],
+            [selection.domain_urn] if selection.domain_urn else [],
+        ),
         (EntityType.TAG, [item.urn for item in recommendations.tags], selection.tag_urns),
-        (EntityType.OWNER, [recommendations.owner.urn] if recommendations.owner else [], [selection.owner_urn] if selection.owner_urn else []),
-        (EntityType.DATASET, [item.urn for item in recommendations.datasets], selection.dataset_urns),
+        (
+            EntityType.OWNER,
+            [recommendations.owner.urn] if recommendations.owner else [],
+            [selection.owner_urn] if selection.owner_urn else [],
+        ),
+        (
+            EntityType.DATASET,
+            [item.urn for item in recommendations.datasets],
+            selection.dataset_urns,
+        ),
     ]
     actions: list[ReviewAction] = []
     for entity_type, recommended, selected in pairs:
         recommended_set, selected_set = set(recommended), set(selected)
         for urn in sorted(recommended_set & selected_set):
-            actions.append(ReviewAction(entity_type=entity_type, urn=urn, action="accepted", created_at=now))
+            actions.append(
+                ReviewAction(entity_type=entity_type, urn=urn, action="accepted", created_at=now)
+            )
         additions = sorted(selected_set - recommended_set)
         removed = sorted(recommended_set - selected_set)
         for urn in additions:
@@ -285,7 +314,9 @@ def _review_actions(recommendations: RecommendationSet, selection: ReviewSelecti
                 )
             )
         for urn in removed:
-            actions.append(ReviewAction(entity_type=entity_type, urn=urn, action="removed", created_at=now))
+            actions.append(
+                ReviewAction(entity_type=entity_type, urn=urn, action="removed", created_at=now)
+            )
     return actions
 
 

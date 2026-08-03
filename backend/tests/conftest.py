@@ -15,9 +15,27 @@ def catalog() -> CatalogSnapshot:
     platform = data["platform"]
     env = data["env"]
     return CatalogSnapshot(
-        domains=[Domain(urn=f"urn:li:domain:{item['id']}", name=item["name"], description=item["description"]) for item in data["domains"]],
-        tags=[Tag(urn=f"urn:li:tag:{item['id']}", name=item["id"], description=item["description"]) for item in data["tags"]],
-        owners=[Owner(urn=f"urn:li:corpgroup:{item['id']}", name=item["name"], description=item["description"], owner_type="CORP_GROUP") for item in data["teams"]],
+        domains=[
+            Domain(
+                urn=f"urn:li:domain:{item['id']}",
+                name=item["name"],
+                description=item["description"],
+            )
+            for item in data["domains"]
+        ],
+        tags=[
+            Tag(urn=f"urn:li:tag:{item['id']}", name=item["id"], description=item["description"])
+            for item in data["tags"]
+        ],
+        owners=[
+            Owner(
+                urn=f"urn:li:corpgroup:{item['id']}",
+                name=item["name"],
+                description=item["description"],
+                owner_type="CORP_GROUP",
+            )
+            for item in data["teams"]
+        ],
         datasets=[
             Dataset(
                 urn=f"urn:li:dataset:(urn:li:dataPlatform:{platform},{item['name']},{env})",

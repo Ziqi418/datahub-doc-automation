@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
@@ -32,16 +33,26 @@ def recommend_rules(text: str, filename: str, catalog: CatalogSnapshot) -> Recom
     candidates = _score_datasets(extracted, catalog.datasets)
     datasets = _dataset_recommendations(candidates)
     return RecommendationSet(
-        domain=_supported_entity(datasets, catalog.domains, {d.urn: d.domain_urn for d in catalog.datasets}, "domain"),
-        tags=_supported_entities(datasets, catalog.tags, {d.urn: d.tag_urns for d in catalog.datasets}, "tag"),
-        owner=_supported_entity(datasets, catalog.owners, {d.urn: d.owner_urns for d in catalog.datasets}, "owner"),
+        domain=_supported_entity(
+            datasets, catalog.domains, {d.urn: d.domain_urn for d in catalog.datasets}, "domain"
+        ),
+        tags=_supported_entities(
+            datasets, catalog.tags, {d.urn: d.tag_urns for d in catalog.datasets}, "tag"
+        ),
+        owner=_supported_entity(
+            datasets, catalog.owners, {d.urn: d.owner_urns for d in catalog.datasets}, "owner"
+        ),
         datasets=datasets[:5],
         provider="rule",
     )
 
 
-def dataset_candidates(text: str, filename: str, catalog: CatalogSnapshot, limit: int = 30) -> list[Recommendation]:
-    return _dataset_recommendations(_score_datasets(extract_document(text, filename), catalog.datasets))[:limit]
+def dataset_candidates(
+    text: str, filename: str, catalog: CatalogSnapshot, limit: int = 30
+) -> list[Recommendation]:
+    return _dataset_recommendations(
+        _score_datasets(extract_document(text, filename), catalog.datasets)
+    )[:limit]
 
 
 def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> list[_Candidate]:
@@ -56,16 +67,32 @@ def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> li
             if normalized in names or normalized.rsplit(".", 1)[-1] in names:
                 candidate.add(
                     100,
-                    Evidence(kind="sql_table_reference", matched_text=reference.text, location=reference.location),
+                    Evidence(
+                        kind="sql_table_reference",
+                        matched_text=reference.text,
+                        location=reference.location,
+                    ),
                 )
         qualified = dataset.qualified_name.casefold()
-        if qualified and qualified in lower_body:
-            candidate.add(90, Evidence(kind="exact_dataset_name", matched_text=dataset.qualified_name, location="document body"))
+        if qualified and _contains_exact_name(lower_body, qualified):
+            candidate.add(
+                90,
+                Evidence(
+                    kind="exact_dataset_name",
+                    matched_text=dataset.qualified_name,
+                    location="document body",
+                ),
+            )
         short = dataset.name.casefold()
         if short and short in extracted.tokens:
             # A short name collision must remain as multiple candidates; do not choose one silently.
             weight = 45 if short_name_counts[short] == 1 else 25
-            candidate.add(weight, Evidence(kind="exact_dataset_name", matched_text=dataset.name, location="document body"))
+            candidate.add(
+                weight,
+                Evidence(
+                    kind="exact_dataset_name", matched_text=dataset.name, location="document body"
+                ),
+            )
         fields = {field.casefold().split(".")[-1] for field in dataset.schema_fields}
         matching_fields = sorted(fields & extracted.tokens)
         if len(matching_fields) >= 2:
@@ -91,6 +118,10 @@ def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> li
     return sorted(candidates.values(), key=lambda item: (-item.score, item.dataset.urn))
 
 
+def _contains_exact_name(text: str, name: str) -> bool:
+    return bool(re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", text))
+
+
 def _dataset_recommendations(candidates: list[_Candidate]) -> list[Recommendation]:
     active = [candidate for candidate in candidates if candidate.score > 0]
     if not active:
@@ -98,7 +129,9 @@ def _dataset_recommendations(candidates: list[_Candidate]) -> list[Recommendatio
     maximum = active[0].score
     recommendations: list[Recommendation] = []
     for candidate in active:
-        sql_exact = any(evidence.kind == "sql_table_reference" for evidence in candidate.evidence or [])
+        sql_exact = any(
+            evidence.kind == "sql_table_reference" for evidence in candidate.evidence or []
+        )
         confidence = 0.99 if sql_exact else min(0.94, max(0.05, 0.65 * candidate.score / maximum))
         evidence = candidate.evidence or []
         if evidence:
@@ -128,12 +161,16 @@ def _reason(evidence: Evidence) -> str:
     return messages.get(evidence.kind, "Rule-based metadata match.")
 
 
-def _supported_entity(datasets: list[Recommendation], entities: list, associations: dict, entity_kind: str) -> Recommendation | None:
+def _supported_entity(
+    datasets: list[Recommendation], entities: list, associations: dict, entity_kind: str
+) -> Recommendation | None:
     items = _supported_entities(datasets, entities, associations, entity_kind)
     return items[0] if items else None
 
 
-def _supported_entities(datasets: list[Recommendation], entities: list, associations: dict, entity_kind: str) -> list[Recommendation]:
+def _supported_entities(
+    datasets: list[Recommendation], entities: list, associations: dict, entity_kind: str
+) -> list[Recommendation]:
     entity_by_urn = {entity.urn: entity for entity in entities}
     support: dict[str, float] = defaultdict(float)
     for dataset in datasets:
@@ -149,7 +186,13 @@ def _supported_entities(datasets: list[Recommendation], entities: list, associat
             display_name=entity_by_urn[urn].name,
             confidence=round(min(0.95, support[urn]), 3),
             reason=f"Supported by related dataset metadata ({entity_kind}).",
-            evidence=[Evidence(kind=f"related_dataset_{entity_kind}", matched_text=urn, location="related datasets")],
+            evidence=[
+                Evidence(
+                    kind=f"related_dataset_{entity_kind}",
+                    matched_text=urn,
+                    location="related datasets",
+                )
+            ],
             source="rule",
         )
         for urn in ordered[:5]

@@ -11,7 +11,9 @@ from document_enrichment.recommendation.rules import recommend_rules
 
 def _client(tmp_path, in_memory_catalog):
     app = create_app(Settings(database_path=tmp_path / "app.db"))
-    rule = recommend_rules("# Test\n```sql\nselect * from fct_orders\n```", "test.md", in_memory_catalog.catalog)
+    rule = recommend_rules(
+        "# Test\n```sql\nselect * from fct_orders\n```", "test.md", in_memory_catalog.catalog
+    )
     app.dependency_overrides[get_gateway] = lambda: in_memory_catalog
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
         LLMResponse(
@@ -25,15 +27,28 @@ def _client(tmp_path, in_memory_catalog):
 
 def test_upload_validation_does_not_create_analysis(tmp_path, in_memory_catalog) -> None:
     with _client(tmp_path, in_memory_catalog) as client:
-        response = client.post("/api/analyses", files={"file": ("attack.pdf", b"x", "application/pdf")})
+        response = client.post(
+            "/api/analyses", files={"file": ("attack.pdf", b"x", "application/pdf")}
+        )
         assert response.status_code == 415
-        response = client.post("/api/analyses", files={"file": ("empty.md", b"  ", "text/markdown")})
+        response = client.post(
+            "/api/analyses", files={"file": ("empty.md", b"  ", "text/markdown")}
+        )
         assert response.status_code == 400
 
 
 def test_review_records_replacement_and_blocks_direct_publish(tmp_path, in_memory_catalog) -> None:
     with _client(tmp_path, in_memory_catalog) as client:
-        uploaded = client.post("/api/analyses", files={"file": ("revenue.md", b"# Revenue\n```sql\nselect * from fct_orders\n```", "text/markdown")})
+        uploaded = client.post(
+            "/api/analyses",
+            files={
+                "file": (
+                    "revenue.md",
+                    b"# Revenue\n```sql\nselect * from fct_orders\n```",
+                    "text/markdown",
+                )
+            },
+        )
         assert uploaded.status_code == 201
         analysis_id = uploaded.json()["analysis"]["id"]
         assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200

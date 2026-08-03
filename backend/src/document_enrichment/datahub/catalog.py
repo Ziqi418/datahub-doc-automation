@@ -33,14 +33,21 @@ query SearchCatalog($input: SearchInput!) {
           name
           properties { name description qualifiedName }
           schemaMetadata { fields { fieldPath } }
-          ownership { owners { owner { urn } } }
-          domains { domains { urn } }
-          globalTags { tags { tag { urn } } }
+          ownership {
+            owners {
+              owner {
+                ... on CorpUser { urn }
+                ... on CorpGroup { urn }
+              }
+            }
+          }
+          domain { domain { urn } }
+          tags { tags { tag { urn } } }
         }
         ... on Domain { properties { name description } }
         ... on Tag { properties { name description } }
         ... on CorpUser { username properties { displayName title } }
-        ... on CorpGroup { name properties { displayName } }
+        ... on CorpGroup { name properties { displayName description } }
       }
     }
   }
@@ -70,10 +77,14 @@ class GraphQLDataHubCatalogGateway:
             await self._client.aclose()
 
     async def get_snapshot(self, *, force_refresh: bool = False) -> CatalogSnapshot:
+        # A forced refresh must bypass a snapshot that existed before the caller
+        # arrived, but concurrent callers can share a snapshot refreshed while
+        # they waited for the lock.
+        requested_at = time.monotonic()
         if not force_refresh and self._fresh_cache():
             return self._cache_or_raise()
         async with self._refresh_lock:
-            if not force_refresh and self._fresh_cache():
+            if self._fresh_cache() and (not force_refresh or self._cached_at >= requested_at):
                 return self._cache_or_raise()
             snapshot = CatalogSnapshot(
                 domains=[self._to_domain(row) for row in await self._all("DOMAIN")],
@@ -103,6 +114,7 @@ class GraphQLDataHubCatalogGateway:
             or normalized in item.name.casefold()
             or normalized in item.description.casefold()
             or normalized in item.urn.casefold()
+            or (isinstance(item, Dataset) and normalized in item.qualified_name.casefold())
         ]
         return sorted(items, key=lambda item: (item.name.casefold(), item.urn))[:limit]
 
@@ -160,7 +172,9 @@ class GraphQLDataHubCatalogGateway:
             response.raise_for_status()
             body = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise CatalogUnavailableError(f"DataHub GraphQL request failed: {type(exc).__name__}") from exc
+            raise CatalogUnavailableError(
+                f"DataHub GraphQL request failed: {type(exc).__name__}"
+            ) from exc
         if body.get("errors"):
             raise CatalogUnavailableError("DataHub GraphQL returned errors")
         return body
@@ -171,11 +185,19 @@ class GraphQLDataHubCatalogGateway:
 
     def _to_domain(self, row: dict[str, Any]) -> Domain:
         props = self._properties(row)
-        return Domain(urn=row["urn"], name=props.get("name") or row["urn"], description=props.get("description") or "")
+        return Domain(
+            urn=row["urn"],
+            name=props.get("name") or row["urn"],
+            description=props.get("description") or "",
+        )
 
     def _to_tag(self, row: dict[str, Any]) -> Tag:
         props = self._properties(row)
-        return Tag(urn=row["urn"], name=props.get("name") or row["urn"], description=props.get("description") or "")
+        return Tag(
+            urn=row["urn"],
+            name=props.get("name") or row["urn"],
+            description=props.get("description") or "",
+        )
 
     def _to_owner(self, row: dict[str, Any]) -> Owner:
         props = self._properties(row)
@@ -184,7 +206,7 @@ class GraphQLDataHubCatalogGateway:
         return Owner(
             urn=row["urn"],
             name=name,
-            description="",
+            description=props.get("description") or "",
             owner_type=owner_type,
             title=props.get("title") or "",
         )
@@ -193,15 +215,25 @@ class GraphQLDataHubCatalogGateway:
         props = self._properties(row)
         schema = row.get("schemaMetadata") if isinstance(row.get("schemaMetadata"), dict) else {}
         ownership = row.get("ownership") if isinstance(row.get("ownership"), dict) else {}
-        domains = row.get("domains") if isinstance(row.get("domains"), dict) else {}
-        global_tags = row.get("globalTags") if isinstance(row.get("globalTags"), dict) else {}
+        domain = row.get("domain") if isinstance(row.get("domain"), dict) else {}
+        tags = row.get("tags") if isinstance(row.get("tags"), dict) else {}
         return Dataset(
             urn=row["urn"],
             name=props.get("name") or row.get("name") or row["urn"],
             qualified_name=props.get("qualifiedName") or row.get("name") or row["urn"],
             description=props.get("description") or "",
-            schema_fields=[field.get("fieldPath", "") for field in schema.get("fields", []) if field.get("fieldPath")][:100],
-            owner_urns=[owner["owner"]["urn"] for owner in ownership.get("owners", []) if owner.get("owner", {}).get("urn")],
-            domain_urn=next((domain["urn"] for domain in domains.get("domains", []) if domain.get("urn")), None),
-            tag_urns=[tag["tag"]["urn"] for tag in global_tags.get("tags", []) if tag.get("tag", {}).get("urn")],
+            schema_fields=[
+                field.get("fieldPath", "")
+                for field in schema.get("fields", [])
+                if field.get("fieldPath")
+            ][:100],
+            owner_urns=[
+                owner["owner"]["urn"]
+                for owner in ownership.get("owners", [])
+                if owner.get("owner", {}).get("urn")
+            ],
+            domain_urn=domain.get("domain", {}).get("urn"),
+            tag_urns=[
+                tag["tag"]["urn"] for tag in tags.get("tags", []) if tag.get("tag", {}).get("urn")
+            ],
         )

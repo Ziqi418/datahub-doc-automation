@@ -77,7 +77,9 @@ class SQLiteAnalysisStore:
                 """
             )
 
-    def create(self, *, analysis_id: str, filename: str, content: str, sha256: str) -> AnalysisRecord:
+    def create(
+        self, *, analysis_id: str, filename: str, content: str, sha256: str
+    ) -> AnalysisRecord:
         now = utcnow()
         with self._connect() as connection:
             connection.execute(
@@ -85,25 +87,40 @@ class SQLiteAnalysisStore:
                 INSERT INTO analyses (id, source_filename, source_sha256, content, character_count, status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (analysis_id, filename, sha256, content, len(content), AnalysisStatus.UPLOADED.value, now.isoformat(), now.isoformat()),
+                (
+                    analysis_id,
+                    filename,
+                    sha256,
+                    content,
+                    len(content),
+                    AnalysisStatus.UPLOADED.value,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
             )
         return self.get(analysis_id)
 
     def get(self, analysis_id: str) -> AnalysisRecord:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM analyses WHERE id = ?", (analysis_id,)
+            ).fetchone()
         if row is None:
             raise AnalysisNotFoundError(analysis_id)
         return self._record(row)
 
     def content(self, analysis_id: str) -> str:
         with self._connect() as connection:
-            row = connection.execute("SELECT content FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+            row = connection.execute(
+                "SELECT content FROM analyses WHERE id = ?", (analysis_id,)
+            ).fetchone()
         if row is None:
             raise AnalysisNotFoundError(analysis_id)
         return str(row["content"])
 
-    def transition(self, analysis_id: str, target: AnalysisStatus, *, error_code: str | None = None) -> AnalysisRecord:
+    def transition(
+        self, analysis_id: str, target: AnalysisStatus, *, error_code: str | None = None
+    ) -> AnalysisRecord:
         current = self.get(analysis_id)
         if target not in _TRANSITIONS[current.status]:
             raise InvalidStateError(f"Cannot transition {current.status.value} to {target.value}")
@@ -117,7 +134,9 @@ class SQLiteAnalysisStore:
             raise InvalidStateError("Analysis changed concurrently; retry the request")
         return self.get(analysis_id)
 
-    def save_recommendations(self, analysis_id: str, recommendations: RecommendationSet) -> AnalysisRecord:
+    def save_recommendations(
+        self, analysis_id: str, recommendations: RecommendationSet
+    ) -> AnalysisRecord:
         current = self.get(analysis_id)
         if current.status != AnalysisStatus.ANALYZING:
             raise InvalidStateError("Recommendations can only be saved while analyzing")
@@ -140,10 +159,14 @@ class SQLiteAnalysisStore:
             )
         return self.get(analysis_id)
 
-    def save_review(self, analysis_id: str, selection: ReviewSelection, actions: list[ReviewAction]) -> AnalysisRecord:
+    def save_review(
+        self, analysis_id: str, selection: ReviewSelection, actions: list[ReviewAction]
+    ) -> AnalysisRecord:
         current = self.get(analysis_id)
         if current.status != AnalysisStatus.READY_FOR_REVIEW:
-            raise InvalidStateError("An analysis must be ready for review before it can be approved")
+            raise InvalidStateError(
+                "An analysis must be ready for review before it can be approved"
+            )
         now = utcnow()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -170,7 +193,14 @@ class SQLiteAnalysisStore:
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     [
-                        (analysis_id, action.entity_type.value, action.urn, action.action, action.replaced_urn, now.isoformat())
+                        (
+                            analysis_id,
+                            action.entity_type.value,
+                            action.urn,
+                            action.action,
+                            action.replaced_urn,
+                            now.isoformat(),
+                        )
                         for action in actions
                     ],
                 )
@@ -220,7 +250,9 @@ class SQLiteAnalysisStore:
             error_code=row["error_code"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
-            review_started_at=datetime.fromisoformat(row["review_started_at"]) if row["review_started_at"] else None,
+            review_started_at=datetime.fromisoformat(row["review_started_at"])
+            if row["review_started_at"]
+            else None,
             review_completed_at=datetime.fromisoformat(row["review_completed_at"])
             if row["review_completed_at"]
             else None,
