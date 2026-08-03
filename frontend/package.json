@@ -7,17 +7,27 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@mantine/core": "^8.3.18",
+    "@mantine/hooks": "^8.3.18",
+    "@tabler/icons-react": "^3.46.0",
     "@vitejs/plugin-react": "latest",
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "typescript": "latest"
+    "jsdom": "^26.1.0",
+    "typescript": "latest",
+    "vitest": "^3.2.7"
   }
 }

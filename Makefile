@@ -1,5 +1,6 @@
 UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
+BACKEND_PORT ?= 8000
 
 .PHONY: install test lint run migrate migration-status new-migration seed-demo verify-demo-data check-env eval-rules test-llm eval-llm
 
@@ -13,7 +14,7 @@ lint:
 	cd backend && uv run --extra dev ruff check src tests
 
 run:
-	cd backend && uv run uvicorn document_enrichment.api.app:app --reload --port 8000
+	cd backend && uv run uvicorn document_enrichment.api.app:app --app-dir src --reload --port $(BACKEND_PORT)
 
 migrate:
 	mkdir -p backend/data
