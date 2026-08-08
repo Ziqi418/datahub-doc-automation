@@ -570,7 +570,7 @@ agent/gate-8-evaluation-demo
 - DataHub 搜索能找到正文关键字。
 - 至少一个相关 Dataset 的 DataHub 页面能看到该 Document。
 - 关联 Dataset 的确定性变化会产生包含具体差异的 `NEEDS_REVIEW` 记录；无变化的重复检查不产生新审计记录。
-- `STALE`、`ARCHIVED` 文档在后续 RAG 集成中默认降权或排除；`SUPERSEDED` 文档保留历史可追溯性并链接替代版本。
+- `STALE`、`ARCHIVED` 文档在后续知识发现能力中默认降权或排除；`SUPERSEDED` 文档保留历史可追溯性并链接替代版本。
 
 ### 阶段 7.5：发布冲突审核与 Schema Freshness 精化
 
@@ -582,7 +582,7 @@ agent/gate-8-evaluation-demo
 **工作内容**
 
 - 在真正写入 DataHub 前，使用 `searchDocuments` 按最终选择的 Related Datasets、Domain 与标题关键词召回最多 20 篇既有 Document；排除当前 Analysis 的稳定 Document URN。
-- 仅以确定性信号生成“可能冲突”候选：Dataset 重合、标题词元相似度、正文关键词、字段或 SQL 表引用重合。Embedding/LLM 未来可作为召回信号，但不得自动判定冲突已解决。
+- 仅以确定性信号生成“可能冲突”候选：Dataset 重合、标题词元相似度、正文关键词、字段或 SQL 表引用重合。LLM 不得自动判定冲突已解决。
 - 把候选的 Document URN、标题、关联 Dataset、分数、命中证据、检测器版本与检测时间保存到 SQLite，并在审核 UI 显示。
 - 指标、口径、公式等高风险候选必须由用户显式确认后才能发布；普通相似候选也必须可见。系统不得自动合并、替换、归档或删除既有 Document。
 - 为 Analysis 状态机增加明确的冲突审核状态（建议 `CONFLICT_REVIEW`），并提供确认后返回 `APPROVED` 的 API；未确认时 publish 返回 `409` 且不写 DataHub。
@@ -608,56 +608,37 @@ agent/gate-8-evaluation-demo
 - Dataset 的 description、Domain、Owner、Tag、deprecation 变化继续产生可解释差异；无变化重复检查不新增审计记录。
 - 全部 unit/contract tests 通过，并以本地 DataHub v1.6 完成一次从冲突审核到发布、一次字段类型变更到 freshness evidence 的 live 验收。
 
-### 阶段 7.6：Hybrid Semantic Candidate Retrieval 与最多 20 项关联
+### 阶段 7.6：Evidence-first Candidate Retrieval 与最多 20 项关联
 
 **前置条件**
 
 - 阶段 3 的确定性 Dataset 召回、阶段 4 的受限 LLM ranking，以及阶段 7.5 的结构化 schema catalog 均可用。
-- 配置一个可替换的 embedding provider（API key、模型和维度均通过环境变量提供）；测试环境使用 deterministic fake，不向真实 provider 发送 fixture 之外的内容。
-
-**目标架构**
-
-```text
-上传文档
-  ├─ 确定性召回：SQL 表、Dataset 名、schema 字段、metadata 关键词
-  ├─ DataHub keyword search：名称/描述/field metadata
-  └─ semantic 召回：文档语义 ↔ Dataset retrieval document embedding
-          ↓
-稳定融合（保留每一路 evidence）→ 最多 30 个 Dataset 候选
-          ↓
-受限 LLM reranking（只能选择该 30 个 URN）→ 默认展示前 5 个
-          ↓
-“Show more” / 搜索补充 / 人工确认 → 最多 20 个最终 Related Datasets
-```
 
 **工作内容**
 
-- 将当前 `CatalogSnapshot` 明确命名为缓存的 catalog view；它不是 freshness baseline。每个 Dataset 构造 canonical retrieval document：qualified name、description、field path/description、Domain、Tags、Owners、platform/environment。
-- 新增 `EmbeddingProvider` protocol 和 OpenAI-compatible 实现；embedding 模型、维度、超时及是否启用均由后端环境变量配置，provider 不可用时降级为“规则 + DataHub keyword”并在 UI 可见提示。
-- 在 SQLite 缓存 Dataset embedding，缓存键至少含 Dataset URN、retrieval-document fingerprint、embedding model 和维度；catalog refresh 只重算 fingerprint 变化的 Dataset。Local MVP 用 NumPy cosine scan，限制在 catalog cache 内存视图；不在此阶段引入外部 vector database。生产多实例/大 catalog 的 pgvector 或专用 vector index 是后续架构决策，不隐式加入 MVP。
-- 将确定性 Top 30、DataHub keyword Top 20、semantic Top 30 做 stable reciprocal-rank fusion；强 SQL/table exact match 作为不可被语义分数淹没的 anchor。融合后输出最多 30 个候选，并保留每个候选的来源、rank、分数及匹配证据。
-- 修正当前推荐路径中“规则层先截为 5 个，导致 LLM 实际看不到 Top 30”的缺口。LLM 只看到融合后的 Dataset Top 30、必要的 metadata 摘要和候选 URN 白名单；Domain/Tag/Owner 仍由候选 Dataset 关系推导并由 LLM 辅助重排。
-- 将 `RecommendationSet` 的“默认展示”与“最终选择”解耦：默认 UI 首屏最多展示 5 个 Dataset/Tag，用户可展开更多候选或搜索 catalog；`ReviewSelection.dataset_urns` 和 `tag_urns` 上限提升为 20。发布、冲突检查、baseline 与 DataHub SDK 均处理最多 20 个关联。
-- 重新命名 UI 百分比为“证据强度”，并展示 structural / keyword / semantic / LLM 四类 evidence；它不是校准后的正确概率。
-- 增加 8 个以上覆盖同义词、纯 SQL、短名歧义、多 Dataset runbook 的 gold fixture；记录 Recall@30、MRR、Top-5 precision/recall、候选融合耗时、embedding cache hit rate 与 LLM prompt token 量。
+- 修正当前推荐路径中“规则层先截为 5 个，导致 LLM 实际看不到 Top 30”的缺口。将 SQL 表引用、Dataset 名、schema 字段和 metadata keyword 的确定性证据聚合成最多 30 个 Dataset 候选。
+- 使用 DataHub 原生 keyword search 作为补充召回，只补充候选并保留来源/evidence；不引入 embedding、向量数据库、语义索引或全库 RAG。
+- 对规则与 keyword 结果做稳定合并；明确 SQL/table exact match 是强 anchor，不能被模糊 keyword 分数淹没。候选携带 qualified name、platform/environment、来源、匹配位置和可解释 evidence。
+- LLM 只看到合并后的最多 30 个 Dataset 及必要 metadata 摘要，并且只能返回候选白名单内的 URN。它负责排序和理由，不负责跨全库检索。
+- 将“默认展示”与“最终选择”解耦：UI 首屏默认展示 5 个 Dataset/Tag，用户可展开候选或搜索 catalog；`ReviewSelection.dataset_urns` 和 `tag_urns` 上限提升为 20。发布、冲突检查、baseline 和 DataHub SDK 都处理最多 20 个关联。
+- 将 UI 百分比命名为“证据强度”，展示 SQL / 名称 / 字段 / keyword / LLM rationale；它不是校准后的正确概率。
+- 新增 pure SQL、短名歧义、多 Dataset runbook 的 gold fixture，记录 Recall@30、Top-5 precision/recall、候选合并耗时和 LLM prompt token 量。
 
 **产物**
 
-- Hybrid retrieval adapter、embedding cache migration、候选 evidence model 和 provider 配置。
-- 最多 30 个候选的 API 与“默认 5 个 + 展开/手动补充至 20 个”的 review UI。
-- 规则/keyword/semantic 融合 contract tests、embedding cache tests、gold retrieval evaluation。
+- Top 30 候选 API、确定性与 DataHub keyword 合并层、candidate evidence model。
+- “默认 5 个 + 展开/手动补充至 20 个”的 review UI。
+- 规则/keyword 合并 contract tests 和 retrieval gold evaluation。
 
 **Gate 7.6 通过标准**
 
-- 对只含 SQL 的文档，显式表引用始终进入候选且在融合结果中保持强证据；语义召回不得替换其确定性解释。
-- 对仅含同义业务语义、没有 Dataset/字段字面匹配的 gold 文档，semantic 路径能将期望 Dataset 召回到 Top 30。
-- 同名 Dataset 保持多个候选且以 qualified name/platform/environment 呈现；系统不静默选择其中一个。
-- LLM 请求中 Dataset 候选数为最多 30，而不是当前意外的最多 5；LLM 返回任何白名单外 URN 都被拒绝。
+- 对只含 SQL 的文档，显式表引用始终进入候选且保留强证据。
+- 同名 Dataset 保持多个候选，以 qualified name/platform/environment 呈现；系统不静默选择其中一个。
+- LLM 请求中 Dataset 候选数为最多 30，而不是当前意外的最多 5；任何白名单外 URN 都被拒绝。
 - 用户可以最终保存和发布 6–20 个 Dataset/Tag 关联；默认界面不因候选较多而失去可读性。
-- embedding provider 不可用时，应用以明确的降级状态继续提供确定性/keyword 推荐，不阻塞人工搜索和发布。
 - 新增 retrieval gold fixtures 上报 Recall@30，且现有确定性 fixture 的 Top-5 指标不回退。
 
-### 阶段 7.7：发布前 Schema Validation、发布结果摘要与 Freshness Evidence UI
+### 阶段 7.7：Schema Linter、发布结果摘要与 Freshness Evidence UI
 
 **前置条件**
 
@@ -665,13 +646,11 @@ agent/gate-8-evaluation-demo
 
 **工作内容**
 
-- 新增发布前 schema validation：从 SQL AST 提取表与列引用，并从受支持的 Markdown inline code / 明确字段表达提取低置信度引用；记录引用位置、所属表/alias、解析置信度和候选 Dataset。
-- 仅相对于用户的最终 Related Datasets 和其**当前** schema 解析字段。结果分类为 `resolved`、`ambiguous`、`unresolved`；`unresolved` 表示“当前无法解析”，不得在没有历史证据时声称字段“已过期”。
+- 新增发布前 schema linter：从 SQL AST 提取表与列引用，并从受支持的 Markdown inline code / 明确字段表达提取低置信度引用；记录引用位置、所属表/alias、解析置信度和候选 Dataset。
+- 仅相对于用户最终确认的 Related Datasets 及其**当前** schema 解析字段。结果分类为 `resolved`、`ambiguous`、`unresolved`；`unresolved` 表示“当前无法解析”，不得在没有历史证据时声称字段“已过期”。
 - 对明确 SQL `table.column` / 无歧义 alias 的未解析字段显示高风险 warning，要求用户显式确认才能发布；模糊自然语言 token 仅作为可见 warning，不阻塞发布。确认记录进入本地审计，不自动修改 Document。
-- 将“已过期”限定为有证据的两种情况：已发布 Document 的 baseline 字段后来被移除/改变，或未来接入的 DataHub aspect history 显示该字段曾存在后被删除。历史查询不作为本 Gate 的硬依赖。
-- review saved 后即可发起只读冲突预览；真正 publish 前仍重新执行一次。发布成功页必须展示最终摘要：检查时间、`0 conflicts found` 或候选数量、哪些高风险候选被确认、以及链接到候选 evidence；不能在成功后只显示 DataHub deep link。
-- 完成 freshness 前端页：已发布 Document 可手动触发只读 freshness check，看到上次检查时间、状态、Dataset 级差异、字段旧值/新值、正文引用字段的影响和 DataHub deep links。无差异、`NEEDS_REVIEW`、检查失败状态均可访问且可理解。
-- 给 freshness API 提供结构化 difference payload，不只返回拼接字符串；稳定 field order 不产生差异。后端保持“不自动重写、不自动删除、不自动发布新版本”的边界。
+- review saved 后即可发起只读冲突预览；真正 publish 前仍重新执行一次。发布成功页必须展示最终摘要：检查时间、`0 conflicts found` 或候选数量、哪些高风险候选被确认，以及链接到 evidence；不能在成功后只显示 DataHub deep link。
+- 完成 freshness 前端页：已发布 Document 可手动触发只读 freshness check，看到上次检查时间、状态、Dataset 级差异、字段旧值/新值、正文引用字段影响和 DataHub deep links。后端提供结构化 difference payload；稳定 field order 不产生差异。
 
 **产物**
 
@@ -681,41 +660,38 @@ agent/gate-8-evaluation-demo
 
 **Gate 7.7 通过标准**
 
-- 文档中明确的 `fct_orders.net_revenue` 在最终选择包含 `fct_orders` 时显示 resolved evidence；不存在字段显示其原始位置和 unresolved reason。
+- 文档中明确的 `fct_orders.net_revenue` 在最终选择包含 `fct_orders` 时显示 resolved evidence；不存在字段显示原始位置和 unresolved reason。
 - 模糊 token 不会被误报为过期字段；无历史证据时 UI 使用“未解析”而不是“过期”。
 - 未确认的高风险未解析字段或高风险 Document conflict 时 publish 返回 `409` 且没有 DataHub 写入；确认后可安全重试。
 - 发布成功页总能看到 conflict summary；普通候选与零候选都明确可见。
 - 字段类型、nullable、description、删除、Dataset description/Domain/Owner/Tag/deprecation 改变产生可读 freshness evidence；字段排序和无变化重复检查不制造差异或新审计记录。
 - 前端 E2E 覆盖“validation warning → explicit confirmation → publish → conflict summary → freshness evidence”。
 
-### 阶段 7.8：带引用的基础 RAG 问答
+### 阶段 7.8：Documentation Drift Inbox 与建议复核摘要（加分项）
 
 **前置条件**
 
-- 已发布 Document、Dataset metadata 和阶段 7.6 的 hybrid retrieval 可用；阶段 7.7 可提供 freshness status 和字段证据。
+- 阶段 7.7 已能识别 `NEEDS_REVIEW` 并返回结构化 freshness evidence。
 
 **工作内容**
 
-- 提供只读问答 API 和 UI：用户以自然语言询问“某字段如何使用”“某指标口径是什么”“某段业务逻辑关联哪些 Dataset”。此功能不创建/修改 DataHub Document，也不替代人工审核发布流程。
-- 建立可引用 knowledge chunks：已发布且未归档的 DataHub native Documents、Dataset description、schema fields、Domain/Tag/Owner 元数据。每个 chunk 保存 source URN、entity type、字段路径（如有）、内容 fingerprint、freshness status 和 deep link。
-- 使用 hybrid retrieval：DataHub keyword search、阶段 7.6 semantic retrieval 与 metadata filters（Domain、Dataset、Document status）；先取有来源的少量 chunks，再由 LLM 生成受 JSON schema 约束的 answer、citations 和 `insufficient_evidence` 标记。
-- 每个实质性结论至少有一个 citation；citation 必须是实际检索到的 DataHub URN/chunk，UI 可跳转到 Document/Dataset/字段。证据不足、来源互相矛盾或仅命中 `NEEDS_REVIEW` / stale 内容时，模型必须说明限制而非补全事实。
-- RAG 默认降权 `NEEDS_REVIEW` 内容，排除 archived/unpublished 内容；用户可在 UI 显式查看已降权来源。只使用用户被授权看到的实体。当前 MVP 没有认证，因此仅允许本地单用户演示；在接入共享部署前，必须把 DataHub 权限传播到 retrieval 和 citation 链路。
-- 为问题、检索 query、延迟、citation coverage 和 abstention 记录最小化审计数据；默认不记录完整问题/上下文正文，除非用户明确启用本地调试。
-- 构造 grounded QA evaluation set，覆盖字段用法、指标定义、跨 Dataset runbook、无答案和过期来源；测量 citation precision、grounded answer rate、abstention correctness、P95 latency。
+- 新增只读 Drift Inbox：聚合本地所有 `NEEDS_REVIEW` Document，按严重程度、最近检测时间和受影响 Dataset 分组，展示受影响字段、字段旧值/新值、文档原始引用位置与 DataHub deep links。
+- 支持从 Inbox 对单篇 Document 重新执行 freshness check；不自动重新发布、改写正文、合并、删除或归档任何 DataHub Document。
+- 增加可选的 LLM “建议复核摘要”：只把已保存的差异、Document 相关片段和引用位置传给模型，输出“为什么需要复核”和“建议人工检查哪些段落”。它不能直接写入 Markdown 或 DataHub，必须明确标记为建议。
+- 对 LLM 不可用、差异不足以定位段落、或文档没有直接引用受影响字段的情况，显示 deterministic diff 而非编造更新建议。
+- 记录 Inbox 数量、`NEEDS_REVIEW` age、重新检查结果和建议摘要耗时；默认不记录完整 Document 正文。
 
 **产物**
 
-- Chunk/index lifecycle、RAG retrieval service、受限 answer provider、问答 API 与带 citations 的 UI。
-- Grounded QA fixtures/evaluation，DataHub deep-link citation renderer，staleness/permission guard tests。
+- Drift Inbox API/UI、按 Document/Dataset 的可解释排序和复查入口。
+- 可选 review-summary provider、严格 JSON schema、fake contract tests 和 LLM 降级 UI。
 
 **Gate 7.8 通过标准**
 
-- 每个成功答案的所有 citations 均能解析到实际检索的 DataHub entity，且页面可打开对应来源。
-- 对 gold QA 的字段用法、指标定义和 runbook 问题，答案只使用已检索证据；citation precision 与 grounded answer rate 目标在开始实现前以 baseline 设定，不以模型主观自评分数替代。
-- 无答案、证据冲突或仅 stale 来源时，系统稳定 abstain/提示限制，不伪造字段、公式或 Dataset。
-- 未发布/归档内容不会进入默认 retrieval；`NEEDS_REVIEW` 内容被降权并在引用中标明。
-- 单元、contract、检索评估和浏览器 E2E 通过；RAG 请求对 DataHub 保持只读。
+- 任一已检测到 drift 的 Document 都可从 Inbox 定位到具体 Dataset、字段差异、原文引用位置和 DataHub 来源。
+- 未发生 drift 的 Document 不出现在 Inbox；重复 freshness check 不造成重复项。
+- 建议复核摘要只引用输入的 evidence；provider 不可用时 Inbox 和 deterministic diff 仍完全可用。
+- 所有操作保持只读，除用户已有的显式发布流程外不修改 DataHub Document。
 
 ### 阶段 8：质量评估、性能与演示封装
 
@@ -753,8 +729,7 @@ agent/gate-8-evaluation-demo
 - `Dataset Precision@5 = |predicted_top5 ∩ expected| / |predicted_top5|`；无预测时记 0。
 - `Dataset Recall@5 = |predicted_top5 ∩ expected| / |expected|`。
 - `Dataset Recall@30 = |retrieval_top30 ∩ expected| / |expected|`；用于评估 7.6 的召回层，和 LLM Top-5 精排分开报告。
-- `Citation Precision = supported_answer_claims / answer_claims_with_citations`；只计实际能指向检索 chunk/DataHub URN 的引用。
-- `Abstention Correctness = correctly_abstained_unanswerable_cases / unanswerable_cases`。
+- `Drift Inbox Age = evaluation_time - drift_detected_at`；用于显示仍待处理 drift 的时长。
 - `Domain Accuracy = predicted_domain == expected_domain`。
 - `Tag Acceptance Rate = accepted_recommended_tags / recommended_tags_seen`。
 - `Owner Acceptance Rate = accepted_recommended_owner / recommendation_with_owner`。
@@ -767,8 +742,8 @@ agent/gate-8-evaluation-demo
 - 单元测试：解析、归一化、打分、schema、状态机、上传边界。
 - Contract 测试：GraphQL response 与 SDK publisher 使用录制/构造的固定 payload。
 - Live integration：只针对本地 DataHub 的 MVP namespace。
-- 前端组件测试：候选展开、最多 20 项编辑、schema validation、conflict/freshness evidence、RAG citations、错误状态和可访问性。
-- Playwright：上传 → 混合推荐 → 审核/validation → 发布结果 → freshness evidence；以及带引用问答。
+- 前端组件测试：候选展开、最多 20 项编辑、schema validation、conflict/freshness evidence、Drift Inbox、错误状态和可访问性。
+- Playwright：上传 → 推荐 → 审核/validation → 发布结果 → freshness evidence → Drift Inbox。
 - 手工 DataHub 验收：全局搜索和 Dataset 页面反向关联。
 
 ## 14. 安全设计
@@ -792,8 +767,8 @@ agent/gate-8-evaluation-demo
 - DataHub catalog 使用分页、字段裁剪、5 分钟缓存和 single-flight refresh。
 - 不对每个 Dataset 单独发 GraphQL 请求。
 - 浏览器候选搜索使用后端缓存，输入 debounce，单次最多返回 20 条。
-- 7.6 的 embedding 以 fingerprint 增量缓存；候选融合只保留最多 30 个 Dataset 给 LLM，避免 prompt 随 catalog 线性膨胀。embedding 不可用时降级为 deterministic/keyword retrieval。
-- RAG 先检索有限、可引用的 chunks，再生成答案；禁止把完整 catalog 或完整文档库送入模型上下文。
+- 7.6 候选合并只保留最多 30 个 Dataset 给 LLM，避免 prompt 随 catalog 线性膨胀；DataHub keyword search 失败时仍保留确定性候选并在 UI 显示降级状态。
+- 7.8 的建议复核摘要只接收结构化差异和必要的 Document 相关片段；禁止把完整 catalog 或完整文档库送入模型上下文。
 - 默认 GMS/LLM HTTP connect/read timeout，并对只读 catalog 查询做有限重试；发布写入不做无边界自动重试。
 - 前端记录 upload、catalog、recommend、review 和 publish 各阶段耗时，便于判断慢点是在 DataHub、模型还是 UI。
 
@@ -808,9 +783,8 @@ agent/gate-8-evaluation-demo
 | 当前 DataHub 已有其他 demo 数据 | 候选噪声和误修改风险 | 固定 MVP namespace；seed 只 upsert，不清理其他资产 |
 | DataHub 升级改变 API | 集成失败 | 固定 v1.6.0/SDK 1.6.0.15；Stage 0 做 schema preflight |
 | 大 catalog 导致 GraphQL/LLM 慢 | 页面等待和成本升高 | 分页缓存、字段裁剪、候选召回、prompt budget |
-| embedding provider 不可用或模型变更 | semantic 召回降级或向量不可比 | provider abstraction、model/dimension/fingerprint cache key、可见降级、固定 fake contract tests |
-| RAG 幻觉或引用不完整 | 用户依赖错误业务结论 | 检索白名单、强制 citations、无证据 abstain、grounded QA eval、stale 内容降权 |
-| 共享部署缺少权限传播 | RAG 泄露无权 metadata | MVP 仅本地单用户；生产化前接入 DataHub identity/policy filter |
+| DataHub keyword search 不可用 | 补充候选减少 | 保留 SQL/name/schema 的确定性召回、在 UI 显示降级、不得阻塞人工搜索和发布 |
+| LLM 建议摘要不可靠 | 用户误把建议当已修改事实 | 只输入已保存 evidence、严格 JSON schema、标记为建议、绝不自动写回 DataHub 或 Markdown |
 | SQLite 不适合多实例 | 并发部署受限 | MVP 单实例；生产化时再迁移 PostgreSQL |
 
 ## 17. 执行顺序和停止条件
@@ -827,9 +801,9 @@ Gate 0 工程基线
   -> Gate 6 review UI
   -> Gate 7 DataHub publish
   -> Gate 7.5 conflict review and schema freshness core
-  -> Gate 7.6 hybrid semantic retrieval and 20 associations
-  -> Gate 7.7 pre-publish validation and evidence UI
-  -> Gate 7.8 cited RAG
+  -> Gate 7.6 evidence-first retrieval and 20 associations
+  -> Gate 7.7 schema linter and evidence UI
+  -> Gate 7.8 documentation Drift Inbox (bonus)
   -> Gate 8 evaluation/demo
 ```
 
