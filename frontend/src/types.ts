@@ -6,3 +6,5 @@ export interface Analysis { id: string; source_filename: string; character_count
 export interface CatalogItem { urn: string; name: string; description: string; qualified_name: string | null; owner_type: string | null; title: string | null }
 export interface SelectionItem { urn: string; name: string; detail?: string; recommendation?: Recommendation; userSelected?: boolean }
 export interface ReviewSelection { domain_urn: string | null; tag_urns: string[]; owner_urn: string | null; dataset_urns: string[] }
+export interface ConflictCandidate { document_urn: string; title: string; related_dataset_urns: string[]; score: number; evidence: string[]; detector_version: string; detected_at: string; high_risk: boolean; confirmed: boolean }
+export interface PublishResponse { analysis: Analysis; document_urn: string; datahub_document_url: string; related_dataset_urls: string[] }

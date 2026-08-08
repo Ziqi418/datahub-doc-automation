@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from document_enrichment.models import (
     AnalysisRecord,
     AnalysisStatus,
+    DocumentConflictCandidate,
     DocumentFreshnessStatus,
     RecommendationSet,
     ReviewAction,
@@ -232,6 +234,56 @@ class SQLiteAnalysisStore:
         if result.rowcount != 1:
             raise InvalidStateError("Analysis changed concurrently; retry the request")
         return self.get(analysis_id)
+
+    def replace_conflicts(self, analysis_id: str, candidates: list[DocumentConflictCandidate]) -> None:
+        """Persist the deterministic detector output; confirmations survive rechecks."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = {
+                    row["document_urn"]: row["confirmed_at"]
+                    for row in connection.execute(
+                        "SELECT document_urn, confirmed_at FROM document_conflicts WHERE analysis_id = ?", (analysis_id,)
+                    )
+                }
+                connection.execute("DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,))
+                connection.executemany(
+                    """INSERT INTO document_conflicts
+                    (analysis_id, document_urn, title, related_dataset_urns_json, score, evidence_json, detector_version, detected_at, high_risk, confirmed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(
+                        analysis_id, item.document_urn, item.title, json.dumps(item.related_dataset_urns), item.score,
+                        json.dumps(item.evidence), item.detector_version, item.detected_at.isoformat(), int(item.high_risk),
+                        existing.get(item.document_urn),
+                    ) for item in candidates],
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def conflicts(self, analysis_id: str) -> list[DocumentConflictCandidate]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM document_conflicts WHERE analysis_id = ? ORDER BY score DESC, document_urn", (analysis_id,)
+            ).fetchall()
+        return [DocumentConflictCandidate(
+            document_urn=row["document_urn"], title=row["title"],
+            related_dataset_urns=json.loads(row["related_dataset_urns_json"]), score=row["score"],
+            evidence=json.loads(row["evidence_json"]), detector_version=row["detector_version"],
+            detected_at=datetime.fromisoformat(row["detected_at"]), high_risk=bool(row["high_risk"]),
+            confirmed=bool(row["confirmed_at"]),
+        ) for row in rows]
+
+    def confirm_conflict(self, analysis_id: str, document_urn: str) -> list[DocumentConflictCandidate]:
+        with self._connect() as connection:
+            updated = connection.execute(
+                "UPDATE document_conflicts SET confirmed_at = ? WHERE analysis_id = ? AND document_urn = ?",
+                (utcnow().isoformat(), analysis_id, document_urn),
+            )
+        if updated.rowcount != 1:
+            raise KeyError(document_urn)
+        return self.conflicts(analysis_id)
 
     def save_publish_failure(self, analysis_id: str, error_code: str) -> AnalysisRecord:
         return self.transition(analysis_id, AnalysisStatus.PUBLISH_FAILED, error_code=error_code)

@@ -103,7 +103,7 @@ def _verify(document: object, title: str, content: str, selection: ReviewSelecti
         raise PublishVerificationError("DataHub read-back did not preserve document title or body")
     if getattr(document, "status", None) != expected_status:
         raise PublishVerificationError("DataHub read-back returned an unexpected document status")
-    if (getattr(document, "domain", None) or None) != selection.domain_urn:
+    if str(getattr(document, "domain", None) or "") != (selection.domain_urn or ""):
         raise PublishVerificationError("DataHub read-back did not preserve document domain")
     if values("tags") != set(selection.tag_urns):
         raise PublishVerificationError("DataHub read-back did not preserve document tags")

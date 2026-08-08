@@ -22,6 +22,13 @@ from document_enrichment.datahub.catalog import (
     DataHubCatalogGateway,
     GraphQLDataHubCatalogGateway,
 )
+from document_enrichment.datahub.conflicts import (
+    ConflictGatewayUnavailableError,
+    DocumentConflictGateway,
+    GraphQLDocumentConflictGateway,
+    detect_conflicts,
+    title_from_content,
+)
 from document_enrichment.db.store import (
     AnalysisNotFoundError,
     InvalidStateError,
@@ -35,6 +42,7 @@ from document_enrichment.models import (
     CatalogRefreshResponse,
     CatalogSearchItem,
     CatalogSearchResponse,
+    ConflictReviewResponse,
     Dataset,
     EntityType,
     FreshnessCheckResponse,
@@ -89,11 +97,17 @@ def get_publisher(request: Request) -> DocumentPublisher:
     return request.app.state.publisher
 
 
+def get_conflict_gateway(request: Request) -> DocumentConflictGateway:
+    return request.app.state.conflict_gateway
+
+
 def create_app(
-    settings: Settings | None = None, catalog_gateway: DataHubCatalogGateway | None = None
+    settings: Settings | None = None, catalog_gateway: DataHubCatalogGateway | None = None,
+    conflict_gateway: DocumentConflictGateway | None = None,
 ) -> FastAPI:
     app_settings = settings or get_settings()
     gateway = catalog_gateway or GraphQLDataHubCatalogGateway(app_settings)
+    document_gateway = conflict_gateway or GraphQLDocumentConflictGateway(app_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -101,6 +115,7 @@ def create_app(
         store.initialize()
         app.state.store = store
         app.state.catalog_gateway = gateway
+        app.state.conflict_gateway = document_gateway
         app.state.publisher = DataHubDocumentPublisher(app_settings)
         try:
             app.state.llm_provider = OpenAICompatibleProvider(app_settings)
@@ -112,6 +127,12 @@ def create_app(
             result = close()
             if inspect.isawaitable(result):
                 await result
+        if document_gateway is not gateway:
+            close = getattr(document_gateway, "aclose", None)
+            if close is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
         provider = app.state.llm_provider
         if provider and hasattr(provider, "aclose"):
             result = provider.aclose()
@@ -130,6 +151,10 @@ def create_app(
     @app.exception_handler(CatalogUnavailableError)
     async def catalog_unavailable(_: Request, __: CatalogUnavailableError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": "DataHub catalog unavailable"})
+
+    @app.exception_handler(ConflictGatewayUnavailableError)
+    async def conflict_unavailable(_: Request, __: ConflictGatewayUnavailableError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": "DataHub document conflict check unavailable"})
 
     @app.get("/api/health/live")
     async def live() -> dict[str, str]:
@@ -260,20 +285,33 @@ def create_app(
         analysis_id: str,
         store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
         gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+        conflict_gateway: Annotated[DocumentConflictGateway, Depends(get_conflict_gateway)],
         publisher: Annotated[DocumentPublisher, Depends(get_publisher)],
     ) -> PublishResponse:
         try:
             record = store.get(analysis_id)
             if record.status == AnalysisStatus.PUBLISHED:
                 return _publish_response(record, app_settings)
-            record = store.transition(analysis_id, AnalysisStatus.PUBLISHING)
+            if record.status not in {AnalysisStatus.APPROVED, AnalysisStatus.PUBLISH_FAILED}:
+                raise InvalidStateError(f"Cannot publish analysis in {record.status.value}")
             if record.final_selection is None:
                 raise InvalidStateError("A reviewed selection is required before publishing")
             snapshot = await gateway.get_snapshot()
             _validate_selection(record.final_selection, snapshot)
+            content = store.content(record.id)
+            candidates = detect_conflicts(
+                documents=await conflict_gateway.search_documents(
+                    query=_conflict_query(record.final_selection, title_from_content(content, record.source_filename)), limit=20
+                ), selection=record.final_selection, current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
+                title=title_from_content(content, record.source_filename), content=content, detected_at=utcnow(),
+            )
+            store.replace_conflicts(record.id, candidates)
+            if any(candidate.high_risk and not candidate.confirmed for candidate in store.conflicts(record.id)):
+                raise InvalidStateError("High-risk document conflicts require explicit confirmation before publishing")
+            record = store.transition(analysis_id, AnalysisStatus.PUBLISHING)
             published = await publisher.publish(
                 analysis_id=record.id, filename=record.source_filename,
-                source_sha256=record.source_sha256, content=store.content(record.id),
+                source_sha256=record.source_sha256, content=content,
                 selection=record.final_selection,
             )
             updated = store.save_publish_result(
@@ -288,6 +326,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ConflictGatewayUnavailableError:
+            # The pre-write safety check failed, so deliberately do not transition or write.
+            raise
         except (PublishVerificationError, Exception) as exc:
             # Preserve the UNPUBLISHED DataHub entity for a safe retry; never delete it automatically.
             try:
@@ -319,6 +360,52 @@ def create_app(
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.get("/api/analyses/{analysis_id}/conflicts", response_model=ConflictReviewResponse)
+    async def get_conflicts(
+        analysis_id: str, store: Annotated[SQLiteAnalysisStore, Depends(get_store)]
+    ) -> ConflictReviewResponse:
+        try:
+            store.get(analysis_id)
+            return ConflictReviewResponse(candidates=store.conflicts(analysis_id))
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+
+    @app.post("/api/analyses/{analysis_id}/conflicts/check", response_model=ConflictReviewResponse)
+    async def check_conflicts(
+        analysis_id: str,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        conflict_gateway: Annotated[DocumentConflictGateway, Depends(get_conflict_gateway)],
+    ) -> ConflictReviewResponse:
+        try:
+            record = store.get(analysis_id)
+            if record.final_selection is None:
+                raise InvalidStateError("A reviewed selection is required before checking conflicts")
+            content = store.content(analysis_id)
+            candidates = detect_conflicts(
+                documents=await conflict_gateway.search_documents(
+                    query=_conflict_query(record.final_selection, title_from_content(content, record.source_filename)), limit=20
+                ), selection=record.final_selection, current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
+                title=title_from_content(content, record.source_filename), content=content, detected_at=utcnow(),
+            )
+            store.replace_conflicts(analysis_id, candidates)
+            return ConflictReviewResponse(candidates=store.conflicts(analysis_id))
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.put("/api/analyses/{analysis_id}/conflicts/{document_urn:path}/confirm", response_model=ConflictReviewResponse)
+    async def confirm_conflict(
+        analysis_id: str, document_urn: str, store: Annotated[SQLiteAnalysisStore, Depends(get_store)]
+    ) -> ConflictReviewResponse:
+        try:
+            store.get(analysis_id)
+            return ConflictReviewResponse(candidates=store.confirm_conflict(analysis_id, document_urn))
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Conflict candidate not found") from exc
+
     return app
 
 
@@ -337,6 +424,8 @@ def _dataset_baseline(selection: ReviewSelection, snapshot, content: str) -> lis
     mentioned_tokens = extract_document(content).tokens
     return [
         {"urn": item.urn, "description": item.description, "schema_fields": sorted(item.schema_fields),
+         "schema_fingerprint": _schema_fingerprint(item),
+         "field_snapshots": [field.model_dump() for field in sorted(item.field_snapshots, key=lambda field: field.field_path)],
          "domain_urn": item.domain_urn, "owner_urns": sorted(item.owner_urns), "tag_urns": sorted(item.tag_urns),
          "deprecated": item.deprecated,
          "referenced_fields": sorted(
@@ -364,14 +453,35 @@ def _freshness_differences(baseline: list[dict[str, object]], snapshot) -> list[
         if item.deprecated and not previous.get("deprecated", False):
             differences.append(f"Related dataset is now deprecated: {urn}")
         fields = sorted(item.schema_fields)
+        previous_fields = {field["field_path"]: field for field in previous.get("field_snapshots", [])}
+        current_fields = {field.field_path: field.model_dump() for field in item.field_snapshots}
+        for field_path in sorted(set(current_fields) - set(previous_fields)):
+            differences.append(f"{urn} added schema field {field_path}: new={current_fields[field_path]}")
+        for field_path in sorted(set(previous_fields) - set(current_fields)):
+            differences.append(f"{urn} removed schema field {field_path}: old={previous_fields[field_path]}")
+        for field_path in sorted(set(previous_fields) & set(current_fields)):
+            for key in ("native_data_type", "nullable", "description"):
+                if previous_fields[field_path].get(key) != current_fields[field_path].get(key):
+                    differences.append(f"{urn} changed schema field {field_path} {key}: old={previous_fields[field_path].get(key)!r} new={current_fields[field_path].get(key)!r}")
         removed = sorted(set(previous.get("referenced_fields", [])) - set(fields))
         if removed:
             differences.append(f"{urn} removed referenced schema fields: {', '.join(removed)}")
         for key, actual in (("description", item.description), ("domain_urn", item.domain_urn),
                             ("owner_urns", sorted(item.owner_urns)), ("tag_urns", sorted(item.tag_urns))):
             if previous[key] != actual:
-                differences.append(f"{urn} changed {key}")
+                differences.append(f"{urn} changed {key}: old={previous[key]!r} new={actual!r}")
     return differences
+
+
+def _schema_fingerprint(dataset: Dataset) -> str:
+    canonical = [field.model_dump() for field in sorted(dataset.field_snapshots, key=lambda field: field.field_path)]
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _conflict_query(selection: ReviewSelection, title: str) -> str:
+    # DataHub document search takes one string. Retaining both context sources makes
+    # the call deterministic and keeps recall bounded by the server-side top 20.
+    return " ".join([title, *selection.dataset_urns, *([selection.domain_urn] if selection.domain_urn else [])])[:500]
 
 
 def _validate_selection(selection: ReviewSelection, snapshot) -> None:

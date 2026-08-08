@@ -9,7 +9,7 @@ from typing import Any, Protocol
 import httpx
 
 from document_enrichment.config import Settings
-from document_enrichment.models import CatalogSnapshot, Dataset, Domain, Owner, Tag
+from document_enrichment.models import CatalogSnapshot, Dataset, Domain, Owner, SchemaField, Tag
 
 
 class CatalogUnavailableError(RuntimeError):
@@ -40,7 +40,7 @@ query SearchCatalog($input: SearchInput!) {
         ... on Dataset {
           name
           properties { name description qualifiedName }
-          schemaMetadata { fields { fieldPath } }
+          schemaMetadata { fields { fieldPath nativeDataType nullable description } }
           ownership {
             owners {
               owner {
@@ -262,6 +262,14 @@ class GraphQLDataHubCatalogGateway:
                 field.get("fieldPath", "")
                 for field in schema.get("fields", [])
                 if field.get("fieldPath")
+            ][:100],
+            field_snapshots=[
+                SchemaField(
+                    field_path=field["fieldPath"], native_data_type=field.get("nativeDataType"),
+                    nullable=field.get("nullable") if isinstance(field.get("nullable"), bool) else None,
+                    description=field.get("description") or "",
+                )
+                for field in schema.get("fields", []) if field.get("fieldPath")
             ][:100],
             owner_urns=[
                 owner["owner"]["urn"]

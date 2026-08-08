@@ -6,8 +6,15 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from document_enrichment.api.app import create_app, get_gateway, get_llm_provider, get_publisher
+from document_enrichment.api.app import (
+    create_app,
+    get_conflict_gateway,
+    get_gateway,
+    get_llm_provider,
+    get_publisher,
+)
 from document_enrichment.config import Settings
+from document_enrichment.datahub.conflicts import ExistingDocument
 from document_enrichment.models import AnalysisStatus
 from document_enrichment.recommendation.llm import FakeLLMProvider, LLMItem, LLMResponse
 from document_enrichment.recommendation.rules import recommend_rules
@@ -29,12 +36,23 @@ def _client(tmp_path, in_memory_catalog):
         )
     )
     app.dependency_overrides[get_publisher] = lambda: FakePublisher()
+    app.dependency_overrides[get_conflict_gateway] = lambda: FakeConflictGateway()
     return TestClient(app)
 
 
 class FakePublisher:
     async def publish(self, *, analysis_id, **_kwargs):
         return type("Published", (), {"urn": f"urn:li:document:doc-enrichment-{analysis_id}"})()
+
+
+class FakeConflictGateway:
+    def __init__(self, documents=None):
+        self.documents = documents or []
+        self.calls = 0
+
+    async def search_documents(self, *, query, limit=20):
+        self.calls += 1
+        return self.documents[:limit]
 
 
 def _migrate(database_path: Path) -> None:
@@ -136,3 +154,46 @@ def test_freshness_marks_changed_dataset_once(tmp_path, in_memory_catalog) -> No
         assert changed.json()["analysis"]["freshness_status"] == "NEEDS_REVIEW"
         repeated = client.post(f"/api/analyses/{analysis_id}/freshness")
         assert repeated.json()["analysis"]["updated_at"] == changed.json()["analysis"]["updated_at"]
+
+
+def test_high_risk_conflict_blocks_write_until_confirmed(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        publisher = FakePublisher()
+        conflict = FakeConflictGateway([ExistingDocument(
+            urn="urn:li:document:existing", title="Revenue metric definition",
+            text="The revenue metric formula is documented here.",
+            related_dataset_urns=["urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"], domain_urn=None,
+        )])
+        client.app.dependency_overrides[get_publisher] = lambda: publisher
+        client.app.dependency_overrides[get_conflict_gateway] = lambda: conflict
+        uploaded = client.post("/api/analyses", files={"file": (
+            "metric.md", b"# Revenue metric definition\nRevenue metric formula\n```sql\nselect * from fct_orders\n```", "text/markdown"
+        )})
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        assert client.put(f"/api/analyses/{analysis_id}/review", json={"dataset_urns": [
+            "urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"
+        ]}).status_code == 200
+        blocked = client.post(f"/api/analyses/{analysis_id}/publish")
+        assert blocked.status_code == 409
+        conflicts = client.get(f"/api/analyses/{analysis_id}/conflicts").json()["candidates"]
+        assert conflicts[0]["document_urn"] == "urn:li:document:existing"
+        assert conflicts[0]["confirmed"] is False
+        assert client.put(f"/api/analyses/{analysis_id}/conflicts/urn:li:document:existing/confirm").status_code == 200
+        assert client.post(f"/api/analyses/{analysis_id}/publish").status_code == 200
+
+
+def test_schema_field_changes_have_old_and_new_values() -> None:
+    from document_enrichment.api.app import _freshness_differences
+    from document_enrichment.models import CatalogSnapshot, Dataset, SchemaField
+
+    urn = "urn:li:dataset:(urn:li:dataPlatform:test,orders,PROD)"
+    baseline = [{"urn": urn, "description": "", "schema_fields": ["id"], "field_snapshots": [
+        {"field_path": "id", "native_data_type": "BIGINT", "nullable": False, "description": "old"}
+    ], "domain_urn": None, "owner_urns": [], "tag_urns": [], "deprecated": False, "referenced_fields": ["id"]}]
+    snapshot = CatalogSnapshot(datasets=[Dataset(urn=urn, name="orders", qualified_name="orders", schema_fields=["id"], field_snapshots=[
+        SchemaField(field_path="id", native_data_type="VARCHAR", nullable=True, description="new")
+    ])])
+    differences = _freshness_differences(baseline, snapshot)
+    assert any("native_data_type: old='BIGINT' new='VARCHAR'" in item for item in differences)
+    assert any("nullable: old=False new=True" in item for item in differences)

@@ -64,6 +64,16 @@ class Dataset(CatalogEntity):
     domain_urn: str | None = None
     tag_urns: list[str] = Field(default_factory=list)
     deprecated: bool = False
+    field_snapshots: list[SchemaField] = Field(default_factory=list, max_length=100)
+
+
+class SchemaField(BaseModel):
+    """The structured schema projection used for publishing baselines."""
+
+    field_path: str
+    native_data_type: str | None = None
+    nullable: bool | None = None
+    description: str = ""
 
 
 class CatalogSnapshot(BaseModel):
@@ -174,3 +184,19 @@ class FreshnessCheckResponse(BaseModel):
     analysis: AnalysisRecord
     changed: bool
     differences: list[str] = Field(default_factory=list)
+
+
+class DocumentConflictCandidate(BaseModel):
+    document_urn: str
+    title: str
+    related_dataset_urns: list[str] = Field(default_factory=list)
+    score: float = Field(ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list)
+    detector_version: str
+    detected_at: datetime
+    high_risk: bool = False
+    confirmed: bool = False
+
+
+class ConflictReviewResponse(BaseModel):
+    candidates: list[DocumentConflictCandidate] = Field(default_factory=list)
