@@ -192,6 +192,37 @@ class FreshnessCheckResponse(BaseModel):
     analysis: AnalysisRecord
     changed: bool
     differences: list[str] = Field(default_factory=list)
+    evidence: list[FreshnessDifference] = Field(default_factory=list)
+
+
+class FreshnessDifference(BaseModel):
+    dataset_urn: str
+    category: str
+    field_path: str | None = None
+    old_value: object | None = None
+    new_value: object | None = None
+    affects_referenced_field: bool = False
+    message: str
+
+
+class FieldReference(BaseModel):
+    id: str
+    raw_reference: str
+    field_path: str
+    table_or_alias: str | None = None
+    location: str
+    source: str
+    confidence: str
+    status: str
+    candidate_dataset_urns: list[str] = Field(default_factory=list)
+    reason: str
+    high_risk: bool = False
+    confirmed: bool = False
+
+
+class SchemaValidationResponse(BaseModel):
+    checked_at: datetime
+    references: list[FieldReference] = Field(default_factory=list)
 
 
 class DocumentConflictCandidate(BaseModel):

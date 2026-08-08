@@ -4,6 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from document_enrichment.api.app import (
@@ -181,6 +182,87 @@ def test_high_risk_conflict_blocks_write_until_confirmed(tmp_path, in_memory_cat
         assert conflicts[0]["confirmed"] is False
         assert client.put(f"/api/analyses/{analysis_id}/conflicts/urn:li:document:existing/confirm").status_code == 200
         assert client.post(f"/api/analyses/{analysis_id}/publish").status_code == 200
+
+
+def test_schema_linter_blocks_explicit_missing_sql_field_until_confirmed(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post("/api/analyses", files={"file": (
+            "schema.md", b"# Schema\n```sql\nselect fct_orders.not_a_field from fct_orders\n```", "text/markdown"
+        )})
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        assert client.put(f"/api/analyses/{analysis_id}/review", json={"dataset_urns": [
+            "urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"
+        ]}).status_code == 200
+        validation = client.post(f"/api/analyses/{analysis_id}/schema-validation")
+        assert validation.status_code == 200
+        missing = next(item for item in validation.json()["references"] if item["field_path"] == "not_a_field")
+        assert missing["status"] == "unresolved" and missing["high_risk"] is True
+        assert client.post(f"/api/analyses/{analysis_id}/publish").status_code == 409
+        assert client.put(f"/api/analyses/{analysis_id}/schema-validation/{missing['id']}/confirm").status_code == 200
+        assert client.post(f"/api/analyses/{analysis_id}/publish").status_code == 200
+
+
+def test_schema_linter_resolves_a_qualified_field_for_one_selected_dataset(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post("/api/analyses", files={"file": (
+            "schema.md", b"# Schema\n```sql\nselect fct_orders.net_revenue from fct_orders\n```", "text/markdown"
+        )})
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        assert client.put(f"/api/analyses/{analysis_id}/review", json={"dataset_urns": [
+            "urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"
+        ]}).status_code == 200
+        references = client.post(f"/api/analyses/{analysis_id}/schema-validation").json()["references"]
+        resolved = next(item for item in references if item["field_path"] == "net_revenue")
+        assert resolved["status"] == "resolved"
+
+
+def test_return_to_review_preserves_selection_and_downloads_source(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post("/api/analyses", files={"file": (
+            "source.md", b"# Source\n```sql\nselect * from fct_orders\n```", "text/markdown"
+        )})
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        selection = {"dataset_urns": ["urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"]}
+        assert client.put(f"/api/analyses/{analysis_id}/review", json=selection).status_code == 200
+        returned = client.post(f"/api/analyses/{analysis_id}/return-to-review")
+        assert returned.status_code == 200
+        assert returned.json()["status"] == AnalysisStatus.READY_FOR_REVIEW.value
+        assert returned.json()["final_selection"]["dataset_urns"] == selection["dataset_urns"]
+        source = client.get(f"/api/analyses/{analysis_id}/source")
+        assert source.text == "# Source\n```sql\nselect * from fct_orders\n```"
+        assert "attachment;" in source.headers["content-disposition"]
+
+
+def test_conflict_search_query_does_not_mix_asset_urns_into_full_text() -> None:
+    from document_enrichment.api.app import _conflict_query
+    from document_enrichment.models import ReviewSelection
+
+    query = _conflict_query(ReviewSelection(
+        domain_urn="urn:li:domain:finance",
+        dataset_urns=["urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"],
+    ), "Revenue metric definition")
+    assert query == "Revenue metric definition"
+
+
+@pytest.mark.asyncio
+async def test_conflict_retrieval_merges_title_keyword_results() -> None:
+    from document_enrichment.api.app import _retrieve_conflict_documents
+    from document_enrichment.datahub.conflicts import ExistingDocument
+    from document_enrichment.models import ReviewSelection
+
+    document = ExistingDocument("urn:li:document:revenue", "Orders revenue field validation", "", [], None)
+
+    class Gateway:
+        async def search_documents(self, *, query: str, limit: int = 20):
+            return [document] if query == "revenue" else []
+
+    retrieved = await _retrieve_conflict_documents(
+        Gateway(), ReviewSelection(), "Revenue metric definition"
+    )
+    assert retrieved == [document]
 
 
 def test_schema_field_changes_have_old_and_new_values() -> None:

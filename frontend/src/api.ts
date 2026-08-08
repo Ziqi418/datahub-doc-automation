@@ -1,4 +1,4 @@
-import type { Analysis, CatalogItem, ConflictCandidate, DatasetCandidatesResponse, EntityKind, PublishResponse, ReviewSelection } from "./types";
+import type { Analysis, CatalogItem, ConflictCandidate, DatasetCandidatesResponse, EntityKind, FreshnessResponse, PublishResponse, ReviewSelection, SchemaValidationResponse } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -17,3 +17,7 @@ export const publishAnalysis = (id: string) => request<PublishResponse>(`/api/an
 export const getConflicts = (id: string) => request<{ candidates: ConflictCandidate[] }>(`/api/analyses/${id}/conflicts`);
 export const checkConflicts = (id: string) => request<{ candidates: ConflictCandidate[] }>(`/api/analyses/${id}/conflicts/check`, { method: "POST" });
 export const confirmConflict = (id: string, urn: string) => request<{ candidates: ConflictCandidate[] }>(`/api/analyses/${id}/conflicts/${encodeURIComponent(urn)}/confirm`, { method: "PUT" });
+export const checkSchemaValidation = (id: string) => request<SchemaValidationResponse>(`/api/analyses/${id}/schema-validation`, { method: "POST" });
+export const confirmSchemaReference = (id: string, referenceId: string) => request<SchemaValidationResponse>(`/api/analyses/${id}/schema-validation/${encodeURIComponent(referenceId)}/confirm`, { method: "PUT" });
+export const checkFreshness = (id: string) => request<FreshnessResponse>(`/api/analyses/${id}/freshness`, { method: "POST" });
+export const returnToReview = (id: string) => request<Analysis>(`/api/analyses/${id}/return-to-review`, { method: "POST" });

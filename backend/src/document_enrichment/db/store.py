@@ -29,9 +29,9 @@ _TRANSITIONS: dict[AnalysisStatus, set[AnalysisStatus]] = {
     AnalysisStatus.ANALYZING: {AnalysisStatus.READY_FOR_REVIEW, AnalysisStatus.ANALYSIS_FAILED},
     AnalysisStatus.ANALYSIS_FAILED: {AnalysisStatus.ANALYZING},
     AnalysisStatus.READY_FOR_REVIEW: {AnalysisStatus.APPROVED},
-    AnalysisStatus.APPROVED: {AnalysisStatus.PUBLISHING},
+    AnalysisStatus.APPROVED: {AnalysisStatus.PUBLISHING, AnalysisStatus.READY_FOR_REVIEW},
     AnalysisStatus.PUBLISHING: {AnalysisStatus.PUBLISHED, AnalysisStatus.PUBLISH_FAILED},
-    AnalysisStatus.PUBLISH_FAILED: {AnalysisStatus.PUBLISHING},
+    AnalysisStatus.PUBLISH_FAILED: {AnalysisStatus.PUBLISHING, AnalysisStatus.READY_FOR_REVIEW},
     AnalysisStatus.PUBLISHED: set(),
 }
 
@@ -153,6 +153,7 @@ class SQLiteAnalysisStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                prior_selection = current.final_selection
                 updated = connection.execute(
                     """
                     UPDATE analyses SET status = ?, final_selection_json = ?, updated_at = ?, review_completed_at = ?
@@ -169,6 +170,14 @@ class SQLiteAnalysisStore:
                 )
                 if updated.rowcount != 1:
                     raise InvalidStateError("Analysis changed concurrently; retry the request")
+                if prior_selection != selection:
+                    # A confirmation is meaningful only for the exact selected
+                    # catalog context that was reviewed.  Recommendations and
+                    # the user's new selection remain intact for a quick retry.
+                    connection.execute(
+                        "DELETE FROM schema_validation_confirmations WHERE analysis_id = ?", (analysis_id,)
+                    )
+                    connection.execute("DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,))
                 connection.executemany(
                     """
                     INSERT INTO review_actions (analysis_id, entity_type, urn, action, replaced_urn, created_at)
@@ -190,6 +199,20 @@ class SQLiteAnalysisStore:
             except Exception:
                 connection.rollback()
                 raise
+        return self.get(analysis_id)
+
+    def return_to_review(self, analysis_id: str) -> AnalysisRecord:
+        """Re-open an unpublished draft without discarding recommendations or selection."""
+        current = self.get(analysis_id)
+        if current.status not in {AnalysisStatus.APPROVED, AnalysisStatus.PUBLISH_FAILED}:
+            raise InvalidStateError("Only unpublished reviewed analyses can return to review")
+        with self._connect() as connection:
+            result = connection.execute(
+                "UPDATE analyses SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (AnalysisStatus.READY_FOR_REVIEW.value, utcnow().isoformat(), analysis_id, current.status.value),
+            )
+        if result.rowcount != 1:
+            raise InvalidStateError("Analysis changed concurrently; retry the request")
         return self.get(analysis_id)
 
     def review_actions(self, analysis_id: str) -> list[ReviewAction]:
@@ -284,6 +307,22 @@ class SQLiteAnalysisStore:
         if updated.rowcount != 1:
             raise KeyError(document_urn)
         return self.conflicts(analysis_id)
+
+    def confirmed_schema_references(self, analysis_id: str) -> set[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT reference_id FROM schema_validation_confirmations WHERE analysis_id = ?", (analysis_id,)
+            ).fetchall()
+        return {str(row["reference_id"]) for row in rows}
+
+    def confirm_schema_reference(self, analysis_id: str, reference_id: str) -> None:
+        # The reference id is deterministic over source location/text.  This is an
+        # audit acknowledgement only; it never changes the source Document.
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_validation_confirmations (analysis_id, reference_id, confirmed_at) VALUES (?, ?, ?)",
+                (analysis_id, reference_id, utcnow().isoformat()),
+            )
 
     def save_publish_failure(self, analysis_id: str, error_code: str) -> AnalysisRecord:
         return self.transition(analysis_id, AnalysisStatus.PUBLISH_FAILED, error_code=error_code)
