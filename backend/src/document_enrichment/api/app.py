@@ -42,6 +42,7 @@ from document_enrichment.models import (
     CatalogRefreshResponse,
     CatalogSearchItem,
     CatalogSearchResponse,
+    DatasetCandidatesResponse,
     ConflictReviewResponse,
     Dataset,
     EntityType,
@@ -64,7 +65,11 @@ from document_enrichment.recommendation.llm import (
     ProviderError,
     recommend_with_llm,
 )
-from document_enrichment.recommendation.rules import recommend_rules
+from document_enrichment.recommendation.rules import (
+    dataset_candidates,
+    merge_dataset_candidates,
+    recommend_rules,
+)
 
 LOGGER = logging.getLogger(__name__)
 CatalogEntityType = Literal["domains", "tags", "owners", "datasets"]
@@ -204,11 +209,15 @@ def create_app(
             record = store.transition(analysis_id, AnalysisStatus.ANALYZING)
             content = store.content(analysis_id)
             snapshot = await gateway.get_snapshot()
+            candidates, _ = await _retrieve_dataset_candidates(
+                content, record.source_filename, snapshot, gateway
+            )
             recommendations = await recommend_with_llm(
                 provider=provider,
                 text=content,
                 catalog=snapshot,
                 rule_recommendations=recommend_rules(content, record.source_filename, snapshot),
+                dataset_candidates=candidates,
             )
             return store.save_recommendations(analysis_id, recommendations)
         except AnalysisNotFoundError as exc:
@@ -235,6 +244,22 @@ def create_app(
     ) -> AnalysisRecord:
         try:
             return store.get(analysis_id)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+
+    @app.get("/api/analyses/{analysis_id}/dataset-candidates", response_model=DatasetCandidatesResponse)
+    async def get_dataset_candidates(
+        analysis_id: str,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+    ) -> DatasetCandidatesResponse:
+        try:
+            record = store.get(analysis_id)
+            snapshot = await gateway.get_snapshot()
+            items, degraded = await _retrieve_dataset_candidates(
+                store.content(analysis_id), record.source_filename, snapshot, gateway
+            )
+            return DatasetCandidatesResponse(items=items, keyword_search_degraded=degraded)
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
 
@@ -417,6 +442,26 @@ def _publish_response(record: AnalysisRecord, settings: Settings) -> PublishResp
         datahub_document_url=f"{base}/document/{record.document_urn}",
         related_dataset_urls=[f"{base}/dataset/{urn}" for urn in (record.final_selection.dataset_urns if record.final_selection else [])],
     )
+
+
+async def _retrieve_dataset_candidates(
+    content: str, filename: str, snapshot, gateway: DataHubCatalogGateway
+) -> tuple[list, bool]:
+    deterministic = dataset_candidates(content, filename, snapshot, limit=30)
+    extracted = extract_document(content, filename)
+    # Query only concise, deterministic document terms. SQL references are the most
+    # useful query because DataHub's native search can supplement an incomplete cache.
+    terms = [reference.text for reference in extracted.table_references]
+    if not terms:
+        terms = [extracted.title]
+    keyword_results: list[Dataset] = []
+    try:
+        for term in dict.fromkeys(terms):
+            keyword_results.extend(await gateway.keyword_search_datasets(term, limit=30))
+    except CatalogUnavailableError:
+        # Candidate recall remains deterministic when DataHub keyword search is unavailable.
+        return deterministic, True
+    return merge_dataset_candidates(deterministic, keyword_results, limit=30), False
 
 
 def _dataset_baseline(selection: ReviewSelection, snapshot, content: str) -> list[dict[str, object]]:

@@ -181,16 +181,18 @@ async def recommend_with_llm(
     text: str,
     catalog: CatalogSnapshot,
     rule_recommendations: RecommendationSet,
+    dataset_candidates: list[Recommendation] | None = None,
 ) -> RecommendationSet:
     """Constrain the model to lexical candidates, retry once, then validate URNs again."""
-    candidates = _candidate_payload(catalog, rule_recommendations)
+    dataset_candidates = dataset_candidates or rule_recommendations.datasets
+    candidates = _candidate_payload(catalog, rule_recommendations, dataset_candidates)
     document = _trim_document(text, 12_000)
     started = time.perf_counter()
     last_error: ProviderError | None = None
     for _attempt in range(2):
         try:
             ranked = await provider.rank(document=document, candidates=candidates)
-            result = _merge_and_validate(ranked, catalog, rule_recommendations)
+            result = _merge_and_validate(ranked, catalog, rule_recommendations, dataset_candidates)
             result.provider = provider.name
             result.elapsed_ms = int((time.perf_counter() - started) * 1000)
             return result
@@ -202,9 +204,9 @@ async def recommend_with_llm(
 
 
 def _candidate_payload(
-    catalog: CatalogSnapshot, rules: RecommendationSet
+    catalog: CatalogSnapshot, rules: RecommendationSet, dataset_candidates: list[Recommendation]
 ) -> dict[str, list[dict[str, str]]]:
-    allowed_dataset_urns = {item.urn for item in rules.datasets}
+    allowed_dataset_urns = {item.urn for item in dataset_candidates[:30]}
     datasets = [dataset for dataset in catalog.datasets if dataset.urn in allowed_dataset_urns]
     return {
         "domains": [
@@ -240,7 +242,8 @@ def _trim_document(text: str, budget: int) -> str:
 
 
 def _merge_and_validate(
-    ranked: LLMResponse, catalog: CatalogSnapshot, rules: RecommendationSet
+    ranked: LLMResponse, catalog: CatalogSnapshot, rules: RecommendationSet,
+    dataset_candidates: list[Recommendation],
 ) -> RecommendationSet:
     allowed = {
         "domain": {entity.urn: entity for entity in catalog.domains},
@@ -249,10 +252,10 @@ def _merge_and_validate(
         "dataset": {
             entity.urn: entity
             for entity in catalog.datasets
-            if entity.urn in {item.urn for item in rules.datasets}
+            if entity.urn in {item.urn for item in dataset_candidates[:30]}
         },
     }
-    rule_by_urn = {item.urn: item for item in [*rules.datasets, *rules.tags]}
+    rule_by_urn = {item.urn: item for item in [*dataset_candidates, *rules.tags]}
     if rules.domain:
         rule_by_urn[rules.domain.urn] = rules.domain
     if rules.owner:

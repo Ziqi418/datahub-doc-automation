@@ -65,6 +65,13 @@ class InMemoryCatalog:
         values = getattr(self.catalog, entity_type)
         return values[:limit]
 
+    async def keyword_search_datasets(self, query: str, limit: int = 30) -> list[Dataset]:
+        normalized = query.casefold()
+        return [
+            item for item in self.catalog.datasets
+            if normalized in item.name.casefold() or normalized in item.qualified_name.casefold()
+        ][:limit]
+
 
 @pytest.fixture
 def in_memory_catalog(catalog: CatalogSnapshot) -> InMemoryCatalog:

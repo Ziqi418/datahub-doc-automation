@@ -1,5 +1,9 @@
 from document_enrichment.models import CatalogSnapshot, Dataset
-from document_enrichment.recommendation.rules import dataset_candidates, recommend_rules
+from document_enrichment.recommendation.rules import (
+    dataset_candidates,
+    merge_dataset_candidates,
+    recommend_rules,
+)
 
 
 def _dataset(urn_suffix: str, name: str, qualified_name: str | None = None) -> Dataset:
@@ -36,3 +40,15 @@ def test_malformed_sql_falls_back_without_crashing(catalog) -> None:
         "# Bad SQL\n```sql\nselect * from payments where note = 'oops\n```", "bad.md", catalog
     )
     assert result.datasets[0].display_name == "payments"
+
+
+def test_keyword_merge_cannot_displace_sql_anchor() -> None:
+    sql = _dataset("fct_orders", "fct_orders")
+    keyword = _dataset("customers", "customers")
+    deterministic = dataset_candidates(
+        "```sql\nselect * from fct_orders\n```", "report.md", CatalogSnapshot(datasets=[sql])
+    )
+    merged = merge_dataset_candidates(deterministic, [keyword], limit=30)
+    assert [item.urn for item in merged] == [sql.urn, keyword.urn]
+    assert any(item.kind == "sql_table_reference" for item in merged[0].evidence)
+    assert merged[1].source == "datahub_keyword"

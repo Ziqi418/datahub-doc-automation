@@ -55,6 +55,36 @@ def dataset_candidates(
     )[:limit]
 
 
+def merge_dataset_candidates(
+    deterministic: list[Recommendation], keyword_datasets: list[Dataset], *, limit: int = 30
+) -> list[Recommendation]:
+    """Stable union that never lets fuzzy keyword matches displace SQL anchors."""
+    merged = {item.urn: item.model_copy(deep=True) for item in deterministic}
+    for dataset in keyword_datasets:
+        keyword_evidence = Evidence(
+            kind="datahub_keyword_search",
+            matched_text=dataset.qualified_name,
+            location="DataHub native keyword search",
+        )
+        if dataset.urn in merged:
+            merged[dataset.urn].evidence.append(keyword_evidence)
+            continue
+        merged[dataset.urn] = Recommendation(
+            urn=dataset.urn,
+            display_name=dataset.qualified_name,
+            confidence=0.2,
+            reason="Returned by DataHub keyword search.",
+            evidence=[keyword_evidence],
+            source="datahub_keyword",
+        )
+
+    def order(item: Recommendation) -> tuple[int, float, str]:
+        anchor = any(e.kind == "sql_table_reference" for e in item.evidence)
+        return (0 if anchor else 1, -item.confidence, item.urn)
+
+    return sorted(merged.values(), key=order)[:limit]
+
+
 def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> list[_Candidate]:
     candidates: dict[str, _Candidate] = {dataset.urn: _Candidate(dataset) for dataset in datasets}
     lower_body = extracted.body.casefold()

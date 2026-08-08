@@ -28,6 +28,8 @@ class DataHubCatalogGateway(Protocol):
 
     async def search(self, entity_type: str, query: str, limit: int = 20) -> list[object]: ...
 
+    async def keyword_search_datasets(self, query: str, limit: int = 30) -> list[Dataset]: ...
+
 
 _SEARCH_QUERY = """
 query SearchCatalog($input: SearchInput!) {
@@ -126,6 +128,19 @@ class GraphQLDataHubCatalogGateway:
             or (isinstance(item, Dataset) and normalized in item.qualified_name.casefold())
         ]
         return sorted(items, key=lambda item: (item.name.casefold(), item.urn))[:limit]
+
+    async def keyword_search_datasets(self, query: str, limit: int = 30) -> list[Dataset]:
+        """Use DataHub search as supplementary recall; no local semantic index."""
+        normalized = query.strip()
+        if not normalized:
+            return []
+        payload = await self._execute({"input": {"type": "DATASET", "query": normalized, "start": 0, "count": limit}})
+        result = payload.get("data", {}).get("search", {})
+        rows = result.get("searchResults", []) if isinstance(result, dict) else []
+        return sorted(
+            [self._to_dataset(row["entity"]) for row in rows if isinstance(row.get("entity"), dict)],
+            key=lambda item: (item.qualified_name.casefold(), item.urn),
+        )[:limit]
 
     def _fresh_cache(self) -> bool:
         return self._cache is not None and (

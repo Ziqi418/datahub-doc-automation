@@ -101,6 +101,7 @@ class Recommendation(BaseModel):
 
 class RecommendationSet(BaseModel):
     domain: Recommendation | None = None
+    # Five is a presentation default, not the candidate-pool size.
     tags: list[Recommendation] = Field(default_factory=list, max_length=5)
     owner: Recommendation | None = None
     datasets: list[Recommendation] = Field(default_factory=list, max_length=5)
@@ -111,9 +112,9 @@ class RecommendationSet(BaseModel):
 
 class ReviewSelection(BaseModel):
     domain_urn: str | None = None
-    tag_urns: list[str] = Field(default_factory=list, max_length=5)
+    tag_urns: list[str] = Field(default_factory=list, max_length=20)
     owner_urn: str | None = None
-    dataset_urns: list[str] = Field(default_factory=list, max_length=5)
+    dataset_urns: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("tag_urns", "dataset_urns")
     @classmethod
@@ -164,6 +165,13 @@ class CatalogSearchItem(CatalogEntity):
 class CatalogSearchResponse(BaseModel):
     items: list[CatalogSearchItem]
     limit: int
+
+
+class DatasetCandidatesResponse(BaseModel):
+    """Evidence-first retrieval pool used to constrain the LLM and review UI."""
+
+    items: list[Recommendation] = Field(default_factory=list, max_length=30)
+    keyword_search_degraded: bool = False
 
 
 class CatalogRefreshResponse(BaseModel):

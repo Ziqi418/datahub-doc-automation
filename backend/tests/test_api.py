@@ -197,3 +197,20 @@ def test_schema_field_changes_have_old_and_new_values() -> None:
     differences = _freshness_differences(baseline, snapshot)
     assert any("native_data_type: old='BIGINT' new='VARCHAR'" in item for item in differences)
     assert any("nullable: old=False new=True" in item for item in differences)
+
+
+def test_review_accepts_twenty_dataset_associations(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post(
+            "/api/analyses", files={"file": ("x.md", b"# x\n```sql\nselect * from fct_orders\n```", "text/markdown")}
+        )
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        available = [dataset.urn for dataset in in_memory_catalog.catalog.datasets]
+        # The fixture catalog is smaller than 20; repeat-free real URNs still prove
+        # that the expanded model accepts more than the former limit of five.
+        response = client.put(
+            f"/api/analyses/{analysis_id}/review", json={"dataset_urns": available[:8]}
+        )
+        assert response.status_code == 200
+        assert len(response.json()["analysis"]["final_selection"]["dataset_urns"]) == 8
