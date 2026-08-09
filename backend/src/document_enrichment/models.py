@@ -27,6 +27,7 @@ class AnalysisStatus(StrEnum):
 class DocumentFreshnessStatus(StrEnum):
     ACTIVE = "ACTIVE"
     NEEDS_REVIEW = "NEEDS_REVIEW"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     STALE = "STALE"
     SUPERSEDED = "SUPERSEDED"
     ARCHIVED = "ARCHIVED"
@@ -110,11 +111,20 @@ class RecommendationSet(BaseModel):
     elapsed_ms: int = Field(default=0, ge=0)
 
 
+class FieldDisposition(BaseModel):
+    """An auditable reviewer decision for a non-deterministic field reference."""
+
+    reference_id: str
+    action: str  # accept_suggestion, map_dataset, business_term, keep_unresolved
+    dataset_urn: str | None = None
+
+
 class ReviewSelection(BaseModel):
     domain_urn: str | None = None
     tag_urns: list[str] = Field(default_factory=list, max_length=20)
     owner_urn: str | None = None
     dataset_urns: list[str] = Field(default_factory=list, max_length=20)
+    field_dispositions: list[FieldDisposition] = Field(default_factory=list)
 
     @field_validator("tag_urns", "dataset_urns")
     @classmethod
@@ -150,6 +160,7 @@ class AnalysisRecord(BaseModel):
     freshness_status: DocumentFreshnessStatus | None = None
     freshness_reason: str | None = None
     last_freshness_checked_at: datetime | None = None
+    freshness_evidence: list[FreshnessDifference] = Field(default_factory=list)
 
 
 class UploadResponse(BaseModel):
@@ -195,6 +206,11 @@ class FreshnessCheckResponse(BaseModel):
     evidence: list[FreshnessDifference] = Field(default_factory=list)
 
 
+class AnalysisListResponse(BaseModel):
+    items: list[AnalysisRecord] = Field(default_factory=list)
+    total: int
+
+
 class FreshnessDifference(BaseModel):
     dataset_urn: str
     category: str
@@ -203,6 +219,24 @@ class FreshnessDifference(BaseModel):
     new_value: object | None = None
     affects_referenced_field: bool = False
     message: str
+    recommendation_confidence: float | None = None
+    proposed_content: str | None = None
+
+
+class DatabaseChange(BaseModel):
+    id: str
+    dataset_urn: str
+    kind: str
+    field_path: str
+    replacement_field_path: str | None = None
+    migration_id: str
+    summary: str
+
+
+class RecentChangeCheckResponse(BaseModel):
+    changes: list[DatabaseChange]
+    checked_analysis_ids: list[str]
+    affected_analysis_ids: list[str]
 
 
 class FieldReference(BaseModel):
@@ -220,6 +254,20 @@ class FieldReference(BaseModel):
     confirmed: bool = False
 
 
+class FieldSuggestion(BaseModel):
+    reference_id: str
+    dataset_urn: str
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class FieldReviewResponse(BaseModel):
+    checked_at: datetime
+    references: list[FieldReference] = Field(default_factory=list)
+    suggestions: list[FieldSuggestion] = Field(default_factory=list)
+    provider_status: str  # available, unavailable, invalid_response, cached
+
+
 class SchemaValidationResponse(BaseModel):
     checked_at: datetime
     references: list[FieldReference] = Field(default_factory=list)
@@ -235,6 +283,9 @@ class DocumentConflictCandidate(BaseModel):
     detected_at: datetime
     high_risk: bool = False
     confirmed: bool = False
+    semantic_classification: str = "pending"  # duplicate, conflicting, related, unrelated, pending
+    semantic_confidence: float | None = Field(default=None, ge=0, le=1)
+    semantic_reason: str | None = None
 
 
 class ConflictReviewResponse(BaseModel):

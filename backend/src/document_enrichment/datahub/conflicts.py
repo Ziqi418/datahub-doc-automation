@@ -63,7 +63,10 @@ class GraphQLDocumentConflictGateway:
         try:
             response = await self._client.post(
                 str(self._settings.datahub_graphql_url),
-                json={"query": _SEARCH_DOCUMENTS_QUERY, "variables": {"input": {"query": query, "start": 0, "count": limit}}},
+                json={
+                    "query": _SEARCH_DOCUMENTS_QUERY,
+                    "variables": {"input": {"query": query, "start": 0, "count": limit}},
+                },
                 headers=headers,
             )
             response.raise_for_status()
@@ -82,22 +85,53 @@ class GraphQLDocumentConflictGateway:
             contents = info.get("contents") if isinstance(info.get("contents"), dict) else {}
             domain = document.get("domain") if isinstance(document.get("domain"), dict) else {}
             related_assets = info.get("relatedAssets", [])
-            documents.append(ExistingDocument(
-                urn=document["urn"], title=info.get("title") or "", text=contents.get("text") or "",
-                related_dataset_urns=sorted(
-                    asset["asset"]["urn"]
-                    for asset in related_assets
-                    if isinstance(asset, dict)
-                    and isinstance(asset.get("asset"), dict)
-                    and str(asset["asset"].get("urn", "")).startswith("urn:li:dataset:")
-                ),
-                domain_urn=(domain.get("domain") or {}).get("urn") if isinstance(domain.get("domain"), dict) else None,
-            ))
+            documents.append(
+                ExistingDocument(
+                    urn=document["urn"],
+                    title=info.get("title") or "",
+                    text=contents.get("text") or "",
+                    related_dataset_urns=sorted(
+                        asset["asset"]["urn"]
+                        for asset in related_assets
+                        if isinstance(asset, dict)
+                        and isinstance(asset.get("asset"), dict)
+                        and str(asset["asset"].get("urn", "")).startswith("urn:li:dataset:")
+                    ),
+                    domain_urn=(domain.get("domain") or {}).get("urn")
+                    if isinstance(domain.get("domain"), dict)
+                    else None,
+                )
+            )
         return documents
 
 
 _WORD = re.compile(r"[\w-]+", re.UNICODE)
 _HIGH_RISK = {"metric", "metrics", "formula", "definition", "kpi", "口径", "指标", "公式", "定义"}
+_STOPWORDS = {
+    "and",
+    "or",
+    "is",
+    "are",
+    "the",
+    "a",
+    "an",
+    "from",
+    "into",
+    "for",
+    "with",
+    "that",
+    "this",
+    "of",
+    "to",
+    "in",
+    "on",
+    "by",
+    "as",
+    "at",
+    "be",
+    "was",
+    "were",
+}
 DETECTOR_VERSION = "deterministic-v1"
 
 
@@ -109,15 +143,25 @@ def title_from_content(content: str, filename: str) -> str:
 
 
 def _tokens(value: str) -> set[str]:
-    return {item.casefold() for item in _WORD.findall(value) if len(item) > 1}
+    return {
+        item.casefold()
+        for item in _WORD.findall(value)
+        if len(item) > 1 and item.casefold() not in _STOPWORDS
+    }
 
 
-def detect_conflicts(*, documents: list[ExistingDocument], selection: ReviewSelection,
-                     current_document_urn: str, title: str, content: str, detected_at) -> list[DocumentConflictCandidate]:
+def detect_conflicts(
+    *,
+    documents: list[ExistingDocument],
+    selection: ReviewSelection,
+    current_document_urn: str,
+    title: str,
+    content: str,
+    detected_at,
+) -> list[DocumentConflictCandidate]:
     wanted_datasets = set(selection.dataset_urns)
     title_tokens, body_tokens = _tokens(title), _tokens(content)
     sql_tables = set(re.findall(r"(?i)\b(?:from|join|update|into)\s+([\w.]+)", content))
-    high_risk_source = bool(_tokens(content) & _HIGH_RISK)
     candidates: list[DocumentConflictCandidate] = []
     for document in documents:
         if document.urn == current_document_urn:
@@ -134,15 +178,33 @@ def detect_conflicts(*, documents: list[ExistingDocument], selection: ReviewSele
         keyword_overlap = sorted(body_tokens & _tokens(document.text))
         if len(keyword_overlap) >= 2:
             evidence.append("body keywords: " + ", ".join(keyword_overlap[:8]))
-        table_overlap = sorted(sql_tables & set(re.findall(r"(?i)\b(?:from|join|update|into)\s+([\w.]+)", document.text)))
+        table_overlap = sorted(
+            sql_tables
+            & set(re.findall(r"(?i)\b(?:from|join|update|into)\s+([\w.]+)", document.text))
+        )
         if table_overlap:
             evidence.append("SQL tables: " + ", ".join(table_overlap))
         # Different datasets with merely similar prose are deliberately visible but not blocking.
-        score = min(1.0, 0.55 * bool(shared_datasets) + 0.25 * similarity + 0.1 * bool(keyword_overlap) + 0.2 * bool(table_overlap))
+        score = min(
+            1.0,
+            0.55 * bool(shared_datasets)
+            + 0.25 * similarity
+            + 0.1 * bool(keyword_overlap)
+            + 0.2 * bool(table_overlap),
+        )
         if evidence:
-            candidates.append(DocumentConflictCandidate(
-                document_urn=document.urn, title=document.title, related_dataset_urns=document.related_dataset_urns,
-                score=score, evidence=evidence, detector_version=DETECTOR_VERSION, detected_at=detected_at,
-                high_risk=bool(shared_datasets) and high_risk_source,
-            ))
+            candidates.append(
+                DocumentConflictCandidate(
+                    document_urn=document.urn,
+                    title=document.title,
+                    related_dataset_urns=document.related_dataset_urns,
+                    score=score,
+                    evidence=evidence,
+                    detector_version=DETECTOR_VERSION,
+                    detected_at=detected_at,
+                    # Rule matching is recall only.  Semantic classification decides whether
+                    # a candidate can become a publish gate.
+                    high_risk=False,
+                )
+            )
     return sorted(candidates, key=lambda item: (-item.score, item.document_urn))

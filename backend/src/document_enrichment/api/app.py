@@ -30,6 +30,7 @@ from document_enrichment.datahub.conflicts import (
     detect_conflicts,
     title_from_content,
 )
+from document_enrichment.datahub.mock_changes import recent_database_changes
 from document_enrichment.db.store import (
     AnalysisNotFoundError,
     InvalidStateError,
@@ -38,6 +39,7 @@ from document_enrichment.db.store import (
 )
 from document_enrichment.extraction.document import extract_document
 from document_enrichment.models import (
+    AnalysisListResponse,
     AnalysisRecord,
     AnalysisStatus,
     CatalogRefreshResponse,
@@ -47,10 +49,13 @@ from document_enrichment.models import (
     Dataset,
     DatasetCandidatesResponse,
     EntityType,
+    FieldReviewResponse,
+    FieldSuggestion,
     FreshnessCheckResponse,
     FreshnessDifference,
     Owner,
     PublishResponse,
+    RecentChangeCheckResponse,
     RecommendationSet,
     ReviewAction,
     ReviewSelection,
@@ -111,7 +116,8 @@ def get_conflict_gateway(request: Request) -> DocumentConflictGateway:
 
 
 def create_app(
-    settings: Settings | None = None, catalog_gateway: DataHubCatalogGateway | None = None,
+    settings: Settings | None = None,
+    catalog_gateway: DataHubCatalogGateway | None = None,
     conflict_gateway: DocumentConflictGateway | None = None,
 ) -> FastAPI:
     app_settings = settings or get_settings()
@@ -163,7 +169,9 @@ def create_app(
 
     @app.exception_handler(ConflictGatewayUnavailableError)
     async def conflict_unavailable(_: Request, __: ConflictGatewayUnavailableError) -> JSONResponse:
-        return JSONResponse(status_code=503, content={"detail": "DataHub document conflict check unavailable"})
+        return JSONResponse(
+            status_code=503, content={"detail": "DataHub document conflict check unavailable"}
+        )
 
     @app.get("/api/health/live")
     async def live() -> dict[str, str]:
@@ -201,6 +209,14 @@ def create_app(
                 sha256=hashlib.sha256(raw).hexdigest(),
             )
         )
+
+    @app.get("/api/analyses", response_model=AnalysisListResponse)
+    async def list_analyses(
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    ) -> AnalysisListResponse:
+        items = store.list(limit=limit)
+        return AnalysisListResponse(items=items, total=len(items))
 
     @app.post("/api/analyses/{analysis_id}/recommend", response_model=AnalysisRecord)
     async def recommend_analysis(
@@ -258,13 +274,16 @@ def create_app(
         try:
             record = store.get(analysis_id)
             return Response(
-                content=store.content(analysis_id), media_type="text/markdown; charset=utf-8",
+                content=store.content(analysis_id),
+                media_type="text/markdown; charset=utf-8",
                 headers={"Content-Disposition": f'attachment; filename="{record.source_filename}"'},
             )
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
 
-    @app.get("/api/analyses/{analysis_id}/dataset-candidates", response_model=DatasetCandidatesResponse)
+    @app.get(
+        "/api/analyses/{analysis_id}/dataset-candidates", response_model=DatasetCandidatesResponse
+    )
     async def get_dataset_candidates(
         analysis_id: str,
         store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
@@ -289,7 +308,9 @@ def create_app(
     ) -> ReviewResponse:
         try:
             record = store.get(analysis_id)
-            _validate_selection(selection, await gateway.get_snapshot())
+            snapshot = await gateway.get_snapshot()
+            _validate_selection(selection, snapshot)
+            _validate_field_dispositions(selection, snapshot)
             actions = _review_actions(record.recommendations or RecommendationSet(), selection)
             updated = store.save_review(analysis_id, selection, actions)
             return ReviewResponse(analysis=updated, actions=store.review_actions(analysis_id))
@@ -297,6 +318,29 @@ def create_app(
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/analyses/{analysis_id}/review/field-check", response_model=FieldReviewResponse)
+    async def review_field_check(
+        analysis_id: str,
+        selection: ReviewSelection,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+    ) -> FieldReviewResponse:
+        """Run one bounded field-disambiguation request for the complete draft."""
+        try:
+            store.get(analysis_id)
+            snapshot = await gateway.get_snapshot()
+            _validate_selection(selection, snapshot)
+            return await _review_field_check(
+                store.content(analysis_id),
+                selection,
+                snapshot,
+                request_llm=app.state.llm_provider,
+            )
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -310,6 +354,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.put("/api/analyses/{analysis_id}/review/draft", response_model=AnalysisRecord)
+    async def save_review_draft(
+        analysis_id: str, selection: ReviewSelection,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+    ) -> AnalysisRecord:
+        try:
+            snapshot = await gateway.get_snapshot()
+            _validate_selection(selection, snapshot)
+            _validate_field_dispositions(selection, snapshot)
+            return store.save_draft(analysis_id, selection)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/catalog/{entity_type}", response_model=CatalogSearchResponse)
     async def search_catalog(
@@ -354,26 +416,42 @@ def create_app(
             content = store.content(record.id)
             validation = _schema_validation(record, content, snapshot, store)
             if any(item.high_risk and not item.confirmed for item in validation.references):
-                raise InvalidStateError("High-risk unresolved schema fields require explicit confirmation before publishing")
+                raise InvalidStateError(
+                    "High-risk unresolved schema fields require explicit confirmation before publishing"
+                )
             title = title_from_content(content, record.source_filename)
             candidates = detect_conflicts(
-                documents=await _retrieve_conflict_documents(conflict_gateway, record.final_selection, title),
-                selection=record.final_selection, current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
-                title=title, content=content, detected_at=utcnow(),
+                documents=await _retrieve_conflict_documents(
+                    conflict_gateway, record.final_selection, title
+                ),
+                selection=record.final_selection,
+                current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
+                title=title,
+                content=content,
+                detected_at=utcnow(),
             )
             store.replace_conflicts(record.id, candidates)
-            if any(candidate.high_risk and not candidate.confirmed for candidate in store.conflicts(record.id)):
-                raise InvalidStateError("High-risk document conflicts require explicit confirmation before publishing")
+            if any(
+                candidate.high_risk and not candidate.confirmed
+                for candidate in store.conflicts(record.id)
+            ):
+                raise InvalidStateError(
+                    "High-risk document conflicts require explicit confirmation before publishing"
+                )
             record = store.transition(analysis_id, AnalysisStatus.PUBLISHING)
             published = await publisher.publish(
-                analysis_id=record.id, filename=record.source_filename,
-                source_sha256=record.source_sha256, content=content,
+                analysis_id=record.id,
+                filename=record.source_filename,
+                source_sha256=record.source_sha256,
+                content=content,
                 selection=record.final_selection,
             )
             updated = store.save_publish_result(
-                record.id, document_urn=published.urn,
+                record.id,
+                document_urn=published.urn,
                 dataset_baseline_json=json.dumps(
-                    _dataset_baseline(record.final_selection, snapshot, store.content(record.id)), sort_keys=True
+                    _dataset_baseline(record.final_selection, snapshot, store.content(record.id)),
+                    sort_keys=True,
                 ),
                 published_at=utcnow(),
             )
@@ -392,7 +470,9 @@ def create_app(
             except (AnalysisNotFoundError, InvalidStateError):
                 pass
             LOGGER.warning("publish failed for analysis %s: %s", analysis_id, type(exc).__name__)
-            raise HTTPException(status_code=502, detail="DataHub document publish failed; retry is safe") from exc
+            raise HTTPException(
+                status_code=502, detail="DataHub document publish failed; retry is safe"
+            ) from exc
 
     @app.post("/api/analyses/{analysis_id}/freshness", response_model=FreshnessCheckResponse)
     async def check_freshness(
@@ -409,11 +489,87 @@ def create_app(
             evidence = _freshness_evidence(baseline, snapshot)
             differences = [item.message for item in evidence]
             updated = store.save_freshness_check(
-                analysis_id, reason="; ".join(differences) if differences else None, checked_at=utcnow()
+                analysis_id,
+                reason="; ".join(differences) if differences else None,
+                evidence=evidence,
+                checked_at=utcnow(),
             )
-            return FreshnessCheckResponse(analysis=updated, changed=bool(differences), differences=differences, evidence=evidence)
+            return FreshnessCheckResponse(
+                analysis=updated,
+                changed=bool(differences),
+                differences=differences,
+                evidence=evidence,
+            )
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/analyses/{analysis_id}/freshness/acknowledge", response_model=AnalysisRecord)
+    async def acknowledge_freshness(
+        analysis_id: str, store: Annotated[SQLiteAnalysisStore, Depends(get_store)]
+    ) -> AnalysisRecord:
+        try:
+            return store.acknowledge_freshness(analysis_id)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/freshness/recent-changes", response_model=RecentChangeCheckResponse)
+    async def check_recent_database_changes(
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+    ) -> RecentChangeCheckResponse:
+        changes = recent_database_changes()
+        records = store.published_for_datasets({change.dataset_urn for change in changes})
+        affected: list[str] = []
+        for record in records:
+            evidence = _mock_change_evidence(store.content(record.id), changes, record)
+            store.save_freshness_check(
+                record.id,
+                reason="; ".join(item.message for item in evidence) if evidence else None,
+                evidence=evidence,
+                checked_at=utcnow(),
+            )
+            if evidence:
+                affected.append(record.id)
+        return RecentChangeCheckResponse(
+            changes=changes,
+            checked_analysis_ids=[record.id for record in records],
+            affected_analysis_ids=affected,
+        )
+
+    @app.post(
+        "/api/analyses/{analysis_id}/freshness/apply-suggestion", response_model=AnalysisRecord
+    )
+    async def apply_freshness_suggestion(
+        analysis_id: str,
+        evidence_index: Annotated[int, Query(ge=0)],
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        publisher: Annotated[DocumentPublisher, Depends(get_publisher)],
+    ) -> AnalysisRecord:
+        try:
+            record = store.get(analysis_id)
+            if record.status != AnalysisStatus.PUBLISHED or record.final_selection is None:
+                raise InvalidStateError("Suggestions can only be applied to published documents")
+            evidence = record.freshness_evidence[evidence_index]
+            if not evidence.proposed_content or (evidence.recommendation_confidence or 0) < 0.9:
+                raise InvalidStateError("This suggestion requires manual review")
+            content = evidence.proposed_content
+            await publisher.publish(
+                analysis_id=record.id,
+                filename=record.source_filename,
+                source_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                content=content,
+                selection=record.final_selection,
+            )
+            return store.apply_suggested_content(
+                record.id, content, hashlib.sha256(content.encode()).hexdigest()
+            )
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail="Suggestion not found") from exc
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -436,13 +592,20 @@ def create_app(
         try:
             record = store.get(analysis_id)
             if record.final_selection is None:
-                raise InvalidStateError("A reviewed selection is required before checking conflicts")
+                raise InvalidStateError(
+                    "A reviewed selection is required before checking conflicts"
+                )
             content = store.content(analysis_id)
             title = title_from_content(content, record.source_filename)
             candidates = detect_conflicts(
-                documents=await _retrieve_conflict_documents(conflict_gateway, record.final_selection, title),
-                selection=record.final_selection, current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
-                title=title, content=content, detected_at=utcnow(),
+                documents=await _retrieve_conflict_documents(
+                    conflict_gateway, record.final_selection, title
+                ),
+                selection=record.final_selection,
+                current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
+                title=title,
+                content=content,
+                detected_at=utcnow(),
             )
             store.replace_conflicts(analysis_id, candidates)
             return ConflictReviewResponse(candidates=store.conflicts(analysis_id))
@@ -451,19 +614,61 @@ def create_app(
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.put("/api/analyses/{analysis_id}/conflicts/{document_urn:path}/confirm", response_model=ConflictReviewResponse)
+    @app.post("/api/analyses/{analysis_id}/review/conflicts", response_model=ConflictReviewResponse)
+    async def review_conflicts(
+        analysis_id: str,
+        selection: ReviewSelection,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
+        conflict_gateway: Annotated[DocumentConflictGateway, Depends(get_conflict_gateway)],
+    ) -> ConflictReviewResponse:
+        try:
+            record = store.get(analysis_id)
+            snapshot = await gateway.get_snapshot()
+            _validate_selection(selection, snapshot)
+            content = store.content(analysis_id)
+            title = title_from_content(content, record.source_filename)
+            candidates = detect_conflicts(
+                documents=await _retrieve_conflict_documents(conflict_gateway, selection, title),
+                selection=selection,
+                current_document_urn=f"urn:li:document:doc-enrichment-{record.id}",
+                title=title,
+                content=content,
+                detected_at=utcnow(),
+            )
+            candidates = await _semantic_conflicts(
+                content, record.source_filename, candidates, app.state.llm_provider
+            )
+            return ConflictReviewResponse(candidates=candidates)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except InvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put(
+        "/api/analyses/{analysis_id}/conflicts/{document_urn:path}/confirm",
+        response_model=ConflictReviewResponse,
+    )
     async def confirm_conflict(
-        analysis_id: str, document_urn: str, store: Annotated[SQLiteAnalysisStore, Depends(get_store)]
+        analysis_id: str,
+        document_urn: str,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
     ) -> ConflictReviewResponse:
         try:
             store.get(analysis_id)
-            return ConflictReviewResponse(candidates=store.confirm_conflict(analysis_id, document_urn))
+            return ConflictReviewResponse(
+                candidates=store.confirm_conflict(analysis_id, document_urn)
+            )
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Conflict candidate not found") from exc
 
-    @app.post("/api/analyses/{analysis_id}/schema-validation", response_model=SchemaValidationResponse)
+    @app.post(
+        "/api/analyses/{analysis_id}/schema-validation", response_model=SchemaValidationResponse
+    )
     async def schema_validation(
         analysis_id: str,
         store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
@@ -473,15 +678,21 @@ def create_app(
             record = store.get(analysis_id)
             if record.final_selection is None:
                 raise InvalidStateError("A reviewed selection is required before schema validation")
-            return _schema_validation(record, store.content(analysis_id), await gateway.get_snapshot(), store)
+            return _schema_validation(
+                record, store.content(analysis_id), await gateway.get_snapshot(), store
+            )
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except InvalidStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.put("/api/analyses/{analysis_id}/schema-validation/{reference_id}/confirm", response_model=SchemaValidationResponse)
+    @app.put(
+        "/api/analyses/{analysis_id}/schema-validation/{reference_id}/confirm",
+        response_model=SchemaValidationResponse,
+    )
     async def confirm_schema_validation(
-        analysis_id: str, reference_id: str,
+        analysis_id: str,
+        reference_id: str,
         store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
         gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
     ) -> SchemaValidationResponse:
@@ -489,11 +700,15 @@ def create_app(
             record = store.get(analysis_id)
             if record.final_selection is None:
                 raise InvalidStateError("A reviewed selection is required before schema validation")
-            validation = _schema_validation(record, store.content(analysis_id), await gateway.get_snapshot(), store)
+            validation = _schema_validation(
+                record, store.content(analysis_id), await gateway.get_snapshot(), store
+            )
             if reference_id not in {item.id for item in validation.references}:
                 raise KeyError(reference_id)
             store.confirm_schema_reference(analysis_id, reference_id)
-            return _schema_validation(record, store.content(analysis_id), await gateway.get_snapshot(), store)
+            return _schema_validation(
+                record, store.content(analysis_id), await gateway.get_snapshot(), store
+            )
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc
         except InvalidStateError as exc:
@@ -508,18 +723,173 @@ def _publish_response(record: AnalysisRecord, settings: Settings) -> PublishResp
     assert record.document_urn
     base = str(settings.datahub_ui_url).rstrip("/")
     return PublishResponse(
-        analysis=record, document_urn=record.document_urn,
+        analysis=record,
+        document_urn=record.document_urn,
         datahub_document_url=f"{base}/document/{record.document_urn}",
-        related_dataset_urls=[f"{base}/dataset/{urn}" for urn in (record.final_selection.dataset_urns if record.final_selection else [])],
+        related_dataset_urls=[
+            f"{base}/dataset/{urn}"
+            for urn in (record.final_selection.dataset_urns if record.final_selection else [])
+        ],
     )
 
 
-def _schema_validation(record: AnalysisRecord, content: str, snapshot, store: SQLiteAnalysisStore) -> SchemaValidationResponse:
+def _schema_validation(
+    record: AnalysisRecord, content: str, snapshot, store: SQLiteAnalysisStore
+) -> SchemaValidationResponse:
     assert record.final_selection is not None
-    selected = [item for item in snapshot.datasets if item.urn in set(record.final_selection.dataset_urns)]
+    selected = [
+        item for item in snapshot.datasets if item.urn in set(record.final_selection.dataset_urns)
+    ]
     confirmed = store.confirmed_schema_references(record.id)
-    references = [item.model_copy(update={"confirmed": item.id in confirmed}) for item in lint_schema_references(content, selected)]
+    confirmed.update(item.reference_id for item in record.final_selection.field_dispositions)
+    references = [
+        item.model_copy(update={"confirmed": item.id in confirmed})
+        for item in lint_schema_references(content, selected)
+    ]
     return SchemaValidationResponse(checked_at=utcnow(), references=references)
+
+
+def _selected_datasets(selection: ReviewSelection, snapshot) -> list[Dataset]:
+    return [item for item in snapshot.datasets if item.urn in set(selection.dataset_urns)]
+
+
+def _validate_field_dispositions(selection: ReviewSelection, snapshot) -> None:
+    allowed_actions = {"accept_suggestion", "map_dataset", "business_term", "keep_unresolved"}
+    selected = {item.urn for item in _selected_datasets(selection, snapshot)}
+    seen: set[str] = set()
+    for item in selection.field_dispositions:
+        if item.reference_id in seen:
+            raise ValueError("duplicate field disposition")
+        seen.add(item.reference_id)
+        if item.action not in allowed_actions:
+            raise ValueError("invalid field disposition action")
+        if item.action in {"accept_suggestion", "map_dataset"} and item.dataset_urn not in selected:
+            raise ValueError("field mapping must use a selected Dataset")
+
+
+async def _review_field_check(
+    content: str,
+    selection: ReviewSelection,
+    snapshot,
+    request_llm: LLMProvider | None,
+) -> FieldReviewResponse:
+    selected = _selected_datasets(selection, snapshot)
+    references = lint_schema_references(content, selected)
+    dispositions = {item.reference_id for item in selection.field_dispositions}
+    references = [
+        item.model_copy(update={"confirmed": item.id in dispositions}) for item in references
+    ]
+    pending = [item for item in references if item.status in {"ambiguous", "unresolved"}]
+    if not pending:
+        return FieldReviewResponse(
+            checked_at=utcnow(), references=references, suggestions=[], provider_status="available"
+        )
+    if request_llm is None:
+        return FieldReviewResponse(
+            checked_at=utcnow(),
+            references=references,
+            suggestions=[],
+            provider_status="unavailable",
+        )
+    datasets = [
+        {
+            "urn": item.urn,
+            "name": item.qualified_name,
+            "description": item.description[:800],
+            "schema": item.schema_fields[:100],
+        }
+        for item in selected
+    ]
+    fields = [
+        {
+            "reference_id": item.id,
+            "field": item.field_path,
+            "location": item.location,
+            "candidate_dataset_urns": item.candidate_dataset_urns,
+        }
+        for item in pending
+    ]
+    try:
+        result = await request_llm.disambiguate_fields(
+            document=_trim_review_document(content), datasets=datasets, fields=fields
+        )
+        by_id = {item.id: item for item in pending}
+        if len(result.fields) != len(pending) or {
+            item.reference_id for item in result.fields
+        } != set(by_id):
+            raise ProviderError("LLM field response omitted a requested field")
+        suggestions: list[FieldSuggestion] = []
+        for item in result.fields:
+            reference = by_id[item.reference_id]
+            if item.dataset_urn not in reference.candidate_dataset_urns:
+                raise ProviderError("LLM returned a Dataset outside the field whitelist")
+            suggestions.append(
+                FieldSuggestion(
+                    reference_id=item.reference_id,
+                    dataset_urn=item.dataset_urn,
+                    confidence=item.confidence,
+                    reason=item.reason,
+                )
+            )
+        return FieldReviewResponse(
+            checked_at=utcnow(),
+            references=references,
+            suggestions=suggestions,
+            provider_status="available",
+        )
+    except ProviderError:
+        return FieldReviewResponse(
+            checked_at=utcnow(),
+            references=references,
+            suggestions=[],
+            provider_status="invalid_response",
+        )
+
+
+def _trim_review_document(content: str) -> str:
+    # The original document is untrusted.  A bounded context still preserves title and late SQL/definitions.
+    return (
+        content
+        if len(content) <= 12_000
+        else f"{content[:10_000]}\n\n[truncated]\n\n{content[-1_500:]}"
+    )
+
+
+async def _semantic_conflicts(content: str, filename: str, candidates, provider: LLMProvider | None):
+    """Classify the complete recall set in one request for the Review UI."""
+    if not candidates or provider is None:
+        return candidates
+    try:
+        response = await provider.classify_conflicts(
+            document={"title": title_from_content(content, filename), "content": _trim_review_document(content)},
+            candidates=[{"document_urn": item.document_urn, "title": item.title, "content": "",
+                         "related_dataset_urns": item.related_dataset_urns, "rule_evidence": item.evidence}
+                        for item in candidates],
+        )
+        results = [item.model_dump() for item in response.documents]
+        expected = {item.document_urn for item in candidates}
+        if len(results) != len(candidates) or {item["document_urn"] for item in results} != expected:
+            raise ProviderError("LLM conflict response omitted a candidate")
+        if any(item["classification"] not in {"duplicate", "conflicting", "related", "unrelated"} for item in results):
+            raise ProviderError("LLM returned an invalid conflict class")
+        classified = {item["document_urn"]: item for item in results}
+        return [
+            candidate.model_copy(
+                update={
+                    "semantic_classification": classified[candidate.document_urn]["classification"],
+                    "semantic_confidence": classified[candidate.document_urn]["confidence"],
+                    "semantic_reason": classified[candidate.document_urn]["reason"],
+                    "high_risk": classified[candidate.document_urn]["classification"]
+                    in {"duplicate", "conflicting"}
+                    and classified[candidate.document_urn]["confidence"] >= 0.85,
+                }
+            )
+            for candidate in candidates
+        ]
+    except (ProviderError, KeyError, TypeError):
+        # A missing or invalid model result is visible as pending but can never upgrade
+        # a lexical candidate into a publish gate.
+        return candidates
 
 
 async def _retrieve_dataset_candidates(
@@ -542,7 +912,9 @@ async def _retrieve_dataset_candidates(
     return merge_dataset_candidates(deterministic, keyword_results, limit=30), False
 
 
-def _dataset_baseline(selection: ReviewSelection, snapshot, content: str) -> list[dict[str, object]]:
+def _dataset_baseline(
+    selection: ReviewSelection, snapshot, content: str
+) -> list[dict[str, object]]:
     wanted = set(selection.dataset_urns)
     selected = [item for item in snapshot.datasets if item.urn in wanted]
     references_by_dataset: dict[str, set[str]] = {}
@@ -551,19 +923,33 @@ def _dataset_baseline(selection: ReviewSelection, snapshot, content: str) -> lis
             if reference.status == "resolved":
                 references_by_dataset.setdefault(urn, set()).add(reference.field_path)
     return [
-        {"urn": item.urn, "description": item.description, "schema_fields": sorted(item.schema_fields),
-         "schema_fingerprint": _schema_fingerprint(item),
-         "field_snapshots": [field.model_dump() for field in sorted(item.field_snapshots, key=lambda field: field.field_path)],
-         "domain_urn": item.domain_urn, "owner_urns": sorted(item.owner_urns), "tag_urns": sorted(item.tag_urns),
-         "deprecated": item.deprecated,
-         "referenced_fields": sorted(references_by_dataset.get(item.urn, set()))}
-        for item in snapshot.datasets if item.urn in wanted
+        {
+            "urn": item.urn,
+            "description": item.description,
+            "schema_fields": sorted(item.schema_fields),
+            "schema_fingerprint": _schema_fingerprint(item),
+            "field_snapshots": [
+                field.model_dump()
+                for field in sorted(item.field_snapshots, key=lambda field: field.field_path)
+            ],
+            "domain_urn": item.domain_urn,
+            "owner_urns": sorted(item.owner_urns),
+            "tag_urns": sorted(item.tag_urns),
+            "deprecated": item.deprecated,
+            "referenced_fields": sorted(references_by_dataset.get(item.urn, set())),
+        }
+        for item in snapshot.datasets
+        if item.urn in wanted
     ]
 
 
 def _read_dataset_baseline(store: SQLiteAnalysisStore, analysis_id: str) -> list[dict[str, object]]:
-    with store._connect() as connection:  # Store owns the SQLite boundary; no DataHub mutation occurs here.
-        row = connection.execute("SELECT dataset_baseline_json FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+    with (
+        store._connect() as connection
+    ):  # Store owns the SQLite boundary; no DataHub mutation occurs here.
+        row = connection.execute(
+            "SELECT dataset_baseline_json FROM analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
     return json.loads(row["dataset_baseline_json"] or "[]")
 
 
@@ -575,8 +961,29 @@ def _freshness_differences(baseline: list[dict[str, object]], snapshot) -> list[
 def _freshness_evidence(baseline: list[dict[str, object]], snapshot) -> list[FreshnessDifference]:
     current = {item.urn: item for item in snapshot.datasets}
     differences: list[FreshnessDifference] = []
-    def add(urn: str, category: str, message: str, *, field_path: str | None = None, old=None, new=None, referenced=False) -> None:
-        differences.append(FreshnessDifference(dataset_urn=urn, category=category, field_path=field_path, old_value=old, new_value=new, affects_referenced_field=referenced, message=message))
+
+    def add(
+        urn: str,
+        category: str,
+        message: str,
+        *,
+        field_path: str | None = None,
+        old=None,
+        new=None,
+        referenced=False,
+    ) -> None:
+        differences.append(
+            FreshnessDifference(
+                dataset_urn=urn,
+                category=category,
+                field_path=field_path,
+                old_value=old,
+                new_value=new,
+                affects_referenced_field=referenced,
+                message=message,
+            )
+        )
+
     for previous in baseline:
         urn = str(previous["urn"])
         item = current.get(urn)
@@ -584,31 +991,104 @@ def _freshness_evidence(baseline: list[dict[str, object]], snapshot) -> list[Fre
             add(urn, "dataset_removed", f"Related dataset no longer exists: {urn}")
             continue
         if item.deprecated and not previous.get("deprecated", False):
-            add(urn, "deprecation", f"Related dataset is now deprecated: {urn}", old=False, new=True)
+            add(
+                urn, "deprecation", f"Related dataset is now deprecated: {urn}", old=False, new=True
+            )
         fields = sorted(item.schema_fields)
-        previous_fields = {field["field_path"]: field for field in previous.get("field_snapshots", [])}
+        previous_fields = {
+            field["field_path"]: field for field in previous.get("field_snapshots", [])
+        }
         current_fields = {field.field_path: field.model_dump() for field in item.field_snapshots}
         for field_path in sorted(set(current_fields) - set(previous_fields)):
-            add(urn, "field_added", f"{urn} added schema field {field_path}: new={current_fields[field_path]}", field_path=field_path, new=current_fields[field_path])
+            add(
+                urn,
+                "field_added",
+                f"{urn} added schema field {field_path}: new={current_fields[field_path]}",
+                field_path=field_path,
+                new=current_fields[field_path],
+            )
         for field_path in sorted(set(previous_fields) - set(current_fields)):
-            add(urn, "field_removed", f"{urn} removed schema field {field_path}: old={previous_fields[field_path]}", field_path=field_path, old=previous_fields[field_path], referenced=field_path in previous.get("referenced_fields", []))
+            add(
+                urn,
+                "field_removed",
+                f"{urn} removed schema field {field_path}: old={previous_fields[field_path]}",
+                field_path=field_path,
+                old=previous_fields[field_path],
+                referenced=field_path in previous.get("referenced_fields", []),
+            )
         for field_path in sorted(set(previous_fields) & set(current_fields)):
             for key in ("native_data_type", "nullable", "description"):
                 if previous_fields[field_path].get(key) != current_fields[field_path].get(key):
-                    add(urn, f"field_{key}", f"{urn} changed schema field {field_path} {key}: old={previous_fields[field_path].get(key)!r} new={current_fields[field_path].get(key)!r}", field_path=field_path, old=previous_fields[field_path].get(key), new=current_fields[field_path].get(key), referenced=field_path in previous.get("referenced_fields", []))
+                    add(
+                        urn,
+                        f"field_{key}",
+                        f"{urn} changed schema field {field_path} {key}: old={previous_fields[field_path].get(key)!r} new={current_fields[field_path].get(key)!r}",
+                        field_path=field_path,
+                        old=previous_fields[field_path].get(key),
+                        new=current_fields[field_path].get(key),
+                        referenced=field_path in previous.get("referenced_fields", []),
+                    )
         removed = sorted(set(previous.get("referenced_fields", [])) - set(fields))
         if removed:
-            add(urn, "referenced_field_removed", f"{urn} removed referenced schema fields: {', '.join(removed)}", old=removed, referenced=True)
-        for key, actual in (("description", item.description), ("domain_urn", item.domain_urn),
-                            ("owner_urns", sorted(item.owner_urns)), ("tag_urns", sorted(item.tag_urns))):
+            add(
+                urn,
+                "referenced_field_removed",
+                f"{urn} removed referenced schema fields: {', '.join(removed)}",
+                old=removed,
+                referenced=True,
+            )
+        for key, actual in (
+            ("description", item.description),
+            ("domain_urn", item.domain_urn),
+            ("owner_urns", sorted(item.owner_urns)),
+            ("tag_urns", sorted(item.tag_urns)),
+        ):
             if previous[key] != actual:
-                add(urn, key, f"{urn} changed {key}: old={previous[key]!r} new={actual!r}", old=previous[key], new=actual)
+                add(
+                    urn,
+                    key,
+                    f"{urn} changed {key}: old={previous[key]!r} new={actual!r}",
+                    old=previous[key],
+                    new=actual,
+                )
     return differences
 
 
+def _mock_change_evidence(
+    content: str, changes, record: AnalysisRecord
+) -> list[FreshnessDifference]:
+    selected = set(record.final_selection.dataset_urns if record.final_selection else [])
+    evidence: list[FreshnessDifference] = []
+    for change in changes:
+        if change.dataset_urn not in selected or change.field_path not in content:
+            continue
+        proposed = content.replace(
+            change.field_path, change.replacement_field_path or change.field_path
+        )
+        evidence.append(
+            FreshnessDifference(
+                dataset_urn=change.dataset_urn,
+                category=change.kind,
+                field_path=change.field_path,
+                old_value=change.field_path,
+                new_value=change.replacement_field_path,
+                affects_referenced_field=True,
+                message=f"Migration {change.migration_id}: {change.summary}",
+                recommendation_confidence=0.98,
+                proposed_content=proposed,
+            )
+        )
+    return evidence
+
+
 def _schema_fingerprint(dataset: Dataset) -> str:
-    canonical = [field.model_dump() for field in sorted(dataset.field_snapshots, key=lambda field: field.field_path)]
-    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    canonical = [
+        field.model_dump()
+        for field in sorted(dataset.field_snapshots, key=lambda field: field.field_path)
+    ]
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _conflict_query(selection: ReviewSelection, title: str) -> str:

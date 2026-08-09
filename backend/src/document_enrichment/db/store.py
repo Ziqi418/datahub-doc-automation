@@ -10,6 +10,7 @@ from document_enrichment.models import (
     AnalysisStatus,
     DocumentConflictCandidate,
     DocumentFreshnessStatus,
+    FreshnessDifference,
     RecommendationSet,
     ReviewAction,
     ReviewSelection,
@@ -49,7 +50,9 @@ class SQLiteAnalysisStore:
     def initialize(self) -> None:
         """Verify that dbmate has applied the versioned schema before serving requests."""
         if not self.database_path.exists():
-            raise RuntimeError("Database is not initialized; run `make migrate` before starting the API")
+            raise RuntimeError(
+                "Database is not initialized; run `make migrate` before starting the API"
+            )
         try:
             with self._connect() as connection:
                 connection.execute("SELECT 1 FROM schema_migrations LIMIT 1")
@@ -90,6 +93,22 @@ class SQLiteAnalysisStore:
         if row is None:
             raise AnalysisNotFoundError(analysis_id)
         return self._record(row)
+
+    def list(self, *, limit: int = 100) -> list[AnalysisRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM analyses ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
+    def published_for_datasets(self, dataset_urns: set[str]) -> list[AnalysisRecord]:
+        return [
+            record
+            for record in self.list()
+            if record.status == AnalysisStatus.PUBLISHED
+            and record.final_selection is not None
+            and dataset_urns.intersection(record.final_selection.dataset_urns)
+        ]
 
     def content(self, analysis_id: str) -> str:
         with self._connect() as connection:
@@ -175,9 +194,12 @@ class SQLiteAnalysisStore:
                     # catalog context that was reviewed.  Recommendations and
                     # the user's new selection remain intact for a quick retry.
                     connection.execute(
-                        "DELETE FROM schema_validation_confirmations WHERE analysis_id = ?", (analysis_id,)
+                        "DELETE FROM schema_validation_confirmations WHERE analysis_id = ?",
+                        (analysis_id,),
                     )
-                    connection.execute("DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,))
+                    connection.execute(
+                        "DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,)
+                    )
                 connection.executemany(
                     """
                     INSERT INTO review_actions (analysis_id, entity_type, urn, action, replaced_urn, created_at)
@@ -201,6 +223,18 @@ class SQLiteAnalysisStore:
                 raise
         return self.get(analysis_id)
 
+    def save_draft(self, analysis_id: str, selection: ReviewSelection) -> AnalysisRecord:
+        """Persist an in-progress review without moving it to the publishable state."""
+        current = self.get(analysis_id)
+        if current.status != AnalysisStatus.READY_FOR_REVIEW:
+            raise InvalidStateError("Only a review in progress can be saved as a draft")
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE analyses SET final_selection_json = ?, updated_at = ? WHERE id = ?",
+                (selection.model_dump_json(), utcnow().isoformat(), analysis_id),
+            )
+        return self.get(analysis_id)
+
     def return_to_review(self, analysis_id: str) -> AnalysisRecord:
         """Re-open an unpublished draft without discarding recommendations or selection."""
         current = self.get(analysis_id)
@@ -209,7 +243,12 @@ class SQLiteAnalysisStore:
         with self._connect() as connection:
             result = connection.execute(
                 "UPDATE analyses SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-                (AnalysisStatus.READY_FOR_REVIEW.value, utcnow().isoformat(), analysis_id, current.status.value),
+                (
+                    AnalysisStatus.READY_FOR_REVIEW.value,
+                    utcnow().isoformat(),
+                    analysis_id,
+                    current.status.value,
+                ),
             )
         if result.rowcount != 1:
             raise InvalidStateError("Analysis changed concurrently; retry the request")
@@ -250,9 +289,17 @@ class SQLiteAnalysisStore:
                     error_code = NULL, updated_at = ?
                 WHERE id = ? AND status = ?
                 """,
-                (AnalysisStatus.PUBLISHED.value, document_urn, dataset_baseline_json,
-                 published_at.isoformat(), DocumentFreshnessStatus.ACTIVE.value,
-                 published_at.isoformat(), now, analysis_id, AnalysisStatus.PUBLISHING.value),
+                (
+                    AnalysisStatus.PUBLISHED.value,
+                    document_urn,
+                    dataset_baseline_json,
+                    published_at.isoformat(),
+                    DocumentFreshnessStatus.ACTIVE.value,
+                    published_at.isoformat(),
+                    now,
+                    analysis_id,
+                    AnalysisStatus.PUBLISHING.value,
+                ),
             )
         if result.rowcount != 1:
             raise InvalidStateError("Analysis changed concurrently; retry the request")
@@ -266,19 +313,32 @@ class SQLiteAnalysisStore:
                 existing = {
                     row["document_urn"]: row["confirmed_at"]
                     for row in connection.execute(
-                        "SELECT document_urn, confirmed_at FROM document_conflicts WHERE analysis_id = ?", (analysis_id,)
+                        "SELECT document_urn, confirmed_at FROM document_conflicts WHERE analysis_id = ?",
+                        (analysis_id,),
                     )
                 }
-                connection.execute("DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,))
+                connection.execute(
+                    "DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,)
+                )
                 connection.executemany(
                     """INSERT INTO document_conflicts
                     (analysis_id, document_urn, title, related_dataset_urns_json, score, evidence_json, detector_version, detected_at, high_risk, confirmed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [(
-                        analysis_id, item.document_urn, item.title, json.dumps(item.related_dataset_urns), item.score,
-                        json.dumps(item.evidence), item.detector_version, item.detected_at.isoformat(), int(item.high_risk),
-                        existing.get(item.document_urn),
-                    ) for item in candidates],
+                    [
+                        (
+                            analysis_id,
+                            item.document_urn,
+                            item.title,
+                            json.dumps(item.related_dataset_urns),
+                            item.score,
+                            json.dumps(item.evidence),
+                            item.detector_version,
+                            item.detected_at.isoformat(),
+                            int(item.high_risk),
+                            existing.get(item.document_urn),
+                        )
+                        for item in candidates
+                    ],
                 )
                 connection.commit()
             except Exception:
@@ -288,17 +348,27 @@ class SQLiteAnalysisStore:
     def conflicts(self, analysis_id: str) -> list[DocumentConflictCandidate]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM document_conflicts WHERE analysis_id = ? ORDER BY score DESC, document_urn", (analysis_id,)
+                "SELECT * FROM document_conflicts WHERE analysis_id = ? ORDER BY score DESC, document_urn",
+                (analysis_id,),
             ).fetchall()
-        return [DocumentConflictCandidate(
-            document_urn=row["document_urn"], title=row["title"],
-            related_dataset_urns=json.loads(row["related_dataset_urns_json"]), score=row["score"],
-            evidence=json.loads(row["evidence_json"]), detector_version=row["detector_version"],
-            detected_at=datetime.fromisoformat(row["detected_at"]), high_risk=bool(row["high_risk"]),
-            confirmed=bool(row["confirmed_at"]),
-        ) for row in rows]
+        return [
+            DocumentConflictCandidate(
+                document_urn=row["document_urn"],
+                title=row["title"],
+                related_dataset_urns=json.loads(row["related_dataset_urns_json"]),
+                score=row["score"],
+                evidence=json.loads(row["evidence_json"]),
+                detector_version=row["detector_version"],
+                detected_at=datetime.fromisoformat(row["detected_at"]),
+                high_risk=bool(row["high_risk"]),
+                confirmed=bool(row["confirmed_at"]),
+            )
+            for row in rows
+        ]
 
-    def confirm_conflict(self, analysis_id: str, document_urn: str) -> list[DocumentConflictCandidate]:
+    def confirm_conflict(
+        self, analysis_id: str, document_urn: str
+    ) -> list[DocumentConflictCandidate]:
         with self._connect() as connection:
             updated = connection.execute(
                 "UPDATE document_conflicts SET confirmed_at = ? WHERE analysis_id = ? AND document_urn = ?",
@@ -311,7 +381,8 @@ class SQLiteAnalysisStore:
     def confirmed_schema_references(self, analysis_id: str) -> set[str]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT reference_id FROM schema_validation_confirmations WHERE analysis_id = ?", (analysis_id,)
+                "SELECT reference_id FROM schema_validation_confirmations WHERE analysis_id = ?",
+                (analysis_id,),
             ).fetchall()
         return {str(row["reference_id"]) for row in rows}
 
@@ -328,7 +399,12 @@ class SQLiteAnalysisStore:
         return self.transition(analysis_id, AnalysisStatus.PUBLISH_FAILED, error_code=error_code)
 
     def save_freshness_check(
-        self, analysis_id: str, *, reason: str | None, checked_at: datetime
+        self,
+        analysis_id: str,
+        *,
+        reason: str | None,
+        evidence: list[FreshnessDifference],
+        checked_at: datetime,
     ) -> AnalysisRecord:
         record = self.get(analysis_id)
         if record.status != AnalysisStatus.PUBLISHED:
@@ -337,15 +413,59 @@ class SQLiteAnalysisStore:
             # No mutation when the baseline is still current. If a prior check already
             # requested human review, that flag remains until a new review is completed.
             return record
-        freshness = DocumentFreshnessStatus.NEEDS_REVIEW if reason else DocumentFreshnessStatus.ACTIVE
+        freshness = (
+            DocumentFreshnessStatus.NEEDS_REVIEW if reason else DocumentFreshnessStatus.ACTIVE
+        )
         with self._connect() as connection:
+            evidence_json = json.dumps(
+                [item.model_dump(mode="json") for item in evidence], sort_keys=True
+            )
             if reason and record.freshness_reason == reason:
                 # A repeated, identical check is intentionally not a new audit event.
                 return record
             connection.execute(
-                """UPDATE analyses SET freshness_status = ?, freshness_reason = ?,
+                """UPDATE analyses SET freshness_status = ?, freshness_reason = ?, freshness_evidence_json = ?,
                    last_freshness_checked_at = ?, updated_at = ? WHERE id = ?""",
-                (freshness.value, reason, checked_at.isoformat(), utcnow().isoformat(), analysis_id),
+                (
+                    freshness.value,
+                    reason,
+                    evidence_json,
+                    checked_at.isoformat(),
+                    utcnow().isoformat(),
+                    analysis_id,
+                ),
+            )
+        return self.get(analysis_id)
+
+    def acknowledge_freshness(self, analysis_id: str) -> AnalysisRecord:
+        record = self.get(analysis_id)
+        if record.status != AnalysisStatus.PUBLISHED:
+            raise InvalidStateError("Freshness can only be acknowledged for published analyses")
+        if record.freshness_status != DocumentFreshnessStatus.NEEDS_REVIEW:
+            raise InvalidStateError("There is no freshness change waiting for review")
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE analyses SET freshness_status = ?, updated_at = ? WHERE id = ?",
+                (DocumentFreshnessStatus.ACKNOWLEDGED.value, utcnow().isoformat(), analysis_id),
+            )
+        return self.get(analysis_id)
+
+    def apply_suggested_content(
+        self, analysis_id: str, content: str, sha256: str
+    ) -> AnalysisRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE analyses SET content = ?, source_sha256 = ?, character_count = ?,
+                   freshness_status = ?, freshness_reason = NULL, freshness_evidence_json = '[]',
+                   updated_at = ? WHERE id = ?""",
+                (
+                    content,
+                    sha256,
+                    len(content),
+                    DocumentFreshnessStatus.ACTIVE.value,
+                    utcnow().isoformat(),
+                    analysis_id,
+                ),
             )
         return self.get(analysis_id)
 
@@ -379,10 +499,18 @@ class SQLiteAnalysisStore:
             if row["review_completed_at"]
             else None,
             document_urn=row["document_urn"],
-            published_at=datetime.fromisoformat(row["published_at"]) if row["published_at"] else None,
+            published_at=datetime.fromisoformat(row["published_at"])
+            if row["published_at"]
+            else None,
             freshness_status=DocumentFreshnessStatus(row["freshness_status"])
-            if row["freshness_status"] else None,
+            if row["freshness_status"]
+            else None,
             freshness_reason=row["freshness_reason"],
             last_freshness_checked_at=datetime.fromisoformat(row["last_freshness_checked_at"])
-            if row["last_freshness_checked_at"] else None,
+            if row["last_freshness_checked_at"]
+            else None,
+            freshness_evidence=[
+                FreshnessDifference.model_validate(item)
+                for item in json.loads(row["freshness_evidence_json"] or "[]")
+            ],
         )

@@ -667,31 +667,42 @@ agent/gate-8-evaluation-demo
 - 字段类型、nullable、description、删除、Dataset description/Domain/Owner/Tag/deprecation 改变产生可读 freshness evidence；字段排序和无变化重复检查不制造差异或新审计记录。
 - 前端 E2E 覆盖“validation warning → explicit confirmation → publish → conflict summary → freshness evidence”。
 
-### 阶段 7.8：Documentation Drift Inbox 与建议复核摘要（加分项）
+### 阶段 7.8：Review 内 LLM 字段消歧与相似文档语义审查
 
 **前置条件**
 
-- 阶段 7.7 已能识别 `NEEDS_REVIEW` 并返回结构化 freshness evidence。
+- 阶段 7.6 已提供最多 30 个受约束的 Dataset 候选与最多 20 个最终 Dataset 关联；阶段 7.7 已能提取字段引用、检查当前 schema，并检索潜在冲突文档。
 
 **工作内容**
 
-- 新增只读 Drift Inbox：聚合本地所有 `NEEDS_REVIEW` Document，按严重程度、最近检测时间和受影响 Dataset 分组，展示受影响字段、字段旧值/新值、文档原始引用位置与 DataHub deep links。
-- 支持从 Inbox 对单篇 Document 重新执行 freshness check；不自动重新发布、改写正文、合并、删除或归档任何 DataHub Document。
-- 增加可选的 LLM “建议复核摘要”：只把已保存的差异、Document 相关片段和引用位置传给模型，输出“为什么需要复核”和“建议人工检查哪些段落”。它不能直接写入 Markdown 或 DataHub，必须明确标记为建议。
-- 对 LLM 不可用、差异不足以定位段落、或文档没有直接引用受影响字段的情况，显示 deterministic diff 而非编造更新建议。
-- 记录 Inbox 数量、`NEEDS_REVIEW` age、重新检查结果和建议摘要耗时；默认不记录完整 Document 正文。
+- 将字段检查从“保存 Review 后的发布结果页”前移到 **Review 页面内**。用户每次保存或显式点击“检查字段归属”时，后端基于当前 draft `ReviewSelection` 解析文档中的明确字段引用；不要求文档含 SQL，SQL 仅是可选 evidence。
+- 对当前选择中所有 `ambiguous` 与 `unresolved` 字段**合并为每篇文档一次 LLM 请求**。模型看到文档标题、受长度限制的正文/相关片段、已选 Dataset 的名称/描述/schema，以及每个字段的候选白名单和位置；一次返回所有字段的归属建议、置信度和理由。不得为每个字段分别请求模型。
+- LLM 输出使用严格 JSON Schema；每个 `dataset_urn` 必须属于该字段的候选集合。后端重新验证 URN、字段 ID、数量、置信度范围和 schema fingerprint；文档内容、选择或 schema 变化时缓存失效。未配置或不可用时，保留 deterministic 候选和人工选择，不得阻塞 Review 页面加载。
+- Review UI 将字段结果作为 Dataset 选择后的独立区块展示：
+  - 高置信建议（默认阈值 `>= 0.90`）显示推荐 Dataset 和理由，允许用户一键接受或改选；
+  - 中等置信建议显示推荐和候选，由用户显式确认；
+  - 低置信、无候选或模型失败保持 `ambiguous` / `unresolved`，要求用户选择 Dataset、标记为业务术语，或修改文档表达；
+  - 卡片只展示字段、位置、匹配 Dataset 的可读名称和可执行操作；通用解释放入 tooltip/help，不重复占据每张卡片。
+- 在 Review 保存前，所有需要人工决策的字段必须已有可审计处置（接受 LLM 建议、人工映射、标记业务术语或明确保留 unresolved 并确认）。发布前仍执行一次无模型的 schema recheck，防止保存后 schema 变化；该 recheck 不应重新触发逐字段 LLM 调用。
+- 将相似文档检测也前移到 Review 的最后一个区块。规则层只负责**候选召回**：共享 Dataset、相同 SQL 表（若存在）、标题关键词及 DataHub 原生搜索；共享 Dataset 或 token 重叠本身不能视为冲突，也不能阻塞发布。移除停用词和低信息 token，避免 `and`、`is`、`from` 等成为 evidence。
+- 对召回的候选文档合并为**每篇待发布文档一次 LLM 请求**，让模型按 `duplicate`、`conflicting`、`related`、`unrelated` 分类，并返回置信度、简短理由与支持结论的结构化证据。模型依据业务目标、受众、指标/流程定义和实际 Dataset/字段关系判断，不以词袋重叠替代语义判断。
+- 仅高置信 `duplicate` 或 `conflicting`（默认阈值 `>= 0.85`）要求用户确认或返回 Review；`related` 仅展示，不阻塞发布。LLM 不可用时显示候选为“待人工判断”，不将共享 Dataset 自动升级为高风险冲突。
 
 **产物**
 
-- Drift Inbox API/UI、按 Document/Dataset 的可解释排序和复查入口。
-- 可选 review-summary provider、严格 JSON schema、fake contract tests 和 LLM 降级 UI。
+- Review draft 字段检查 API、批量 field-disambiguation provider、严格 JSON contract、结果缓存与审计记录。
+- 字段归属 Review UI：推荐接受、人工映射、业务术语标记和 unresolved 明确处置。
+- 相似文档候选召回与批量 semantic-conflict provider，以及 `duplicate / conflicting / related / unrelated` 的 Review UI。
+- Fake provider、LLM 降级路径、批量请求计数、字段消歧与文档冲突的 unit / contract / E2E tests。
 
 **Gate 7.8 通过标准**
 
-- 任一已检测到 drift 的 Document 都可从 Inbox 定位到具体 Dataset、字段差异、原文引用位置和 DataHub 来源。
-- 未发生 drift 的 Document 不出现在 Inbox；重复 freshness check 不造成重复项。
-- 建议复核摘要只引用输入的 evidence；provider 不可用时 Inbox 和 deterministic diff 仍完全可用。
-- 所有操作保持只读，除用户已有的显式发布流程外不修改 DataHub Document。
+- 对业务语言为主、无 SQL 的文档，只要标题、正文上下文和已选 Dataset metadata 足以支持判断，字段消歧可在 Review 内给出受白名单约束的推荐；不依赖 SQL 解析成功。
+- 单篇文档有多个 ambiguous/unresolved 字段时，字段消歧最多发起一次 LLM 请求（超出未来上限时才显式分批）；模型不会被逐字段调用。
+- LLM 返回候选白名单外 URN、缺失字段结果或无效 JSON 时安全降级为人工选择，且不允许绕过发布前 recheck。
+- 高置信字段建议可接受并形成审计记录；未处置的字段决策不能在 UI 中被静默忽略。
+- 同一 Dataset 上但用途不同的文档被标记为 `related` 而非高风险；只有高置信 `duplicate` / `conflicting` 才要求确认并影响发布门禁。
+- conflict evidence 不包含停用词作为理由；每项说明可追溯到 Dataset、字段、业务目标或模型返回的结构化证据。
 
 ### 阶段 8：质量评估、性能与演示封装
 
@@ -729,7 +740,7 @@ agent/gate-8-evaluation-demo
 - `Dataset Precision@5 = |predicted_top5 ∩ expected| / |predicted_top5|`；无预测时记 0。
 - `Dataset Recall@5 = |predicted_top5 ∩ expected| / |expected|`。
 - `Dataset Recall@30 = |retrieval_top30 ∩ expected| / |expected|`；用于评估 7.6 的召回层，和 LLM Top-5 精排分开报告。
-- `Drift Inbox Age = evaluation_time - drift_detected_at`；用于显示仍待处理 drift 的时长。
+- `Field Resolution Acceptance Rate = accepted_field_suggestions / field_suggestions_seen`；用于衡量 Review 内字段消歧建议的有效性。
 - `Domain Accuracy = predicted_domain == expected_domain`。
 - `Tag Acceptance Rate = accepted_recommended_tags / recommended_tags_seen`。
 - `Owner Acceptance Rate = accepted_recommended_owner / recommendation_with_owner`。
@@ -742,8 +753,8 @@ agent/gate-8-evaluation-demo
 - 单元测试：解析、归一化、打分、schema、状态机、上传边界。
 - Contract 测试：GraphQL response 与 SDK publisher 使用录制/构造的固定 payload。
 - Live integration：只针对本地 DataHub 的 MVP namespace。
-- 前端组件测试：候选展开、最多 20 项编辑、schema validation、conflict/freshness evidence、Drift Inbox、错误状态和可访问性。
-- Playwright：上传 → 推荐 → 审核/validation → 发布结果 → freshness evidence → Drift Inbox。
+- 前端组件测试：候选展开、最多 20 项编辑、Review 内字段消歧、相似文档语义审查、conflict/freshness evidence、错误状态和可访问性。
+- Playwright：上传 → 推荐 → Review 内字段消歧 → 相似文档审查 → 发布结果 → freshness evidence。
 - 手工 DataHub 验收：全局搜索和 Dataset 页面反向关联。
 
 ## 14. 安全设计
@@ -768,7 +779,7 @@ agent/gate-8-evaluation-demo
 - 不对每个 Dataset 单独发 GraphQL 请求。
 - 浏览器候选搜索使用后端缓存，输入 debounce，单次最多返回 20 条。
 - 7.6 候选合并只保留最多 30 个 Dataset 给 LLM，避免 prompt 随 catalog 线性膨胀；DataHub keyword search 失败时仍保留确定性候选并在 UI 显示降级状态。
-- 7.8 的建议复核摘要只接收结构化差异和必要的 Document 相关片段；禁止把完整 catalog 或完整文档库送入模型上下文。
+- 7.8 的字段消歧与相似文档语义审查每篇文档最多各一次 LLM 请求；只接收当前文档、已选 Dataset 的必要 metadata 和受限候选文档，禁止把完整 catalog 或完整文档库送入模型上下文。
 - 默认 GMS/LLM HTTP connect/read timeout，并对只读 catalog 查询做有限重试；发布写入不做无边界自动重试。
 - 前端记录 upload、catalog、recommend、review 和 publish 各阶段耗时，便于判断慢点是在 DataHub、模型还是 UI。
 
@@ -784,7 +795,7 @@ agent/gate-8-evaluation-demo
 | DataHub 升级改变 API | 集成失败 | 固定 v1.6.0/SDK 1.6.0.15；Stage 0 做 schema preflight |
 | 大 catalog 导致 GraphQL/LLM 慢 | 页面等待和成本升高 | 分页缓存、字段裁剪、候选召回、prompt budget |
 | DataHub keyword search 不可用 | 补充候选减少 | 保留 SQL/name/schema 的确定性召回、在 UI 显示降级、不得阻塞人工搜索和发布 |
-| LLM 建议摘要不可靠 | 用户误把建议当已修改事实 | 只输入已保存 evidence、严格 JSON schema、标记为建议、绝不自动写回 DataHub 或 Markdown |
+| LLM 字段/文档语义判断不可靠 | 用户误把建议当确定事实 | 严格候选白名单和 JSON schema；按置信度要求确认；发布前无模型 schema recheck；绝不自动改写 DataHub 或 Markdown |
 | SQLite 不适合多实例 | 并发部署受限 | MVP 单实例；生产化时再迁移 PostgreSQL |
 
 ## 17. 执行顺序和停止条件
@@ -803,7 +814,7 @@ Gate 0 工程基线
   -> Gate 7.5 conflict review and schema freshness core
   -> Gate 7.6 evidence-first retrieval and 20 associations
   -> Gate 7.7 schema linter and evidence UI
-  -> Gate 7.8 documentation Drift Inbox (bonus)
+  -> Gate 7.8 Review 内 LLM 字段消歧与相似文档语义审查
   -> Gate 8 evaluation/demo
 ```
 
