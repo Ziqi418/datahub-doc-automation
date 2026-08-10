@@ -1,0 +1,57 @@
+.document-row-link,
+.document-row-link:hover {
+  background: transparent;
+}
+
+.document-row-copy {
+  min-width: 0;
+  text-align: left;
+}
+
+.document-row-copy .mantine-Text-root {
+  white-space: normal;
+}
+
+.document-row-copy .mantine-Badge-root {
+  flex: none;
+}
+
+.review-card {
+  overflow: visible;
+}
+
+.review-card:focus-within {
+  position: relative;
+  z-index: 3;
+}
+
+.recommendation-option {
+  width: 100%;
+  border: 1px solid #e7e5e4;
+  border-radius: 8px;
+  background: #fff;
+  color: #1c1917;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .65rem .75rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recommendation-option:hover:not(:disabled) {
+  border-color: #a5b4fc;
+  background: #fafaff;
+}
+
+.recommendation-option:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.recommendation-option small {
+  display: block;
+  margin-top: 2px;
+  color: #78716c;
+}

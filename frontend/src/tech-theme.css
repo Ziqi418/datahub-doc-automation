@@ -1,0 +1,90 @@
+:root {
+  background: #eef4ff;
+  color: #172033;
+}
+
+body {
+  background: #eef4ff;
+}
+
+.app-shell {
+  background:
+    radial-gradient(circle at 12% -5%, rgba(34, 211, 238, .24), transparent 28rem),
+    radial-gradient(circle at 90% 10%, rgba(129, 92, 246, .18), transparent 30rem),
+    #eef4ff;
+}
+
+.app-header {
+  border-color: rgba(148, 163, 184, .18);
+}
+
+.surface-card,
+.save-bar {
+  background: rgba(255, 255, 255, .8);
+  border-color: rgba(99, 102, 241, .22);
+  box-shadow: 0 18px 48px rgba(67, 86, 128, .12), inset 0 1px 0 rgba(255, 255, 255, .8);
+  backdrop-filter: blur(14px);
+}
+
+.eyebrow {
+  color: #67e8f9;
+}
+
+.summary-divider {
+  background: linear-gradient(90deg, rgba(103, 232, 249, .55), transparent);
+}
+
+.review-layout {
+  grid-template-columns: minmax(0, 820px) 235px;
+  justify-content: center;
+  align-items: start;
+}
+
+.review-content {
+  width: min(100%, 820px);
+}
+
+.recommendation-heading {
+  justify-content: center;
+  text-align: center;
+}
+
+.document-summary {
+  order: 2;
+  position: sticky;
+  top: 2rem;
+  padding: 1.15rem;
+  border: 1px solid rgba(103, 232, 249, .2);
+  border-radius: 12px;
+  background: rgba(244, 248, 255, .82);
+}
+
+.recommendation-option,
+.selected-item,
+.search-result {
+  background: rgba(250, 252, 255, .9);
+  border-color: rgba(148, 163, 184, .28);
+  color: #172033;
+}
+
+.recommendation-option:hover:not(:disabled),
+.search-result:hover:not(:disabled) {
+  background: rgba(235, 242, 255, .95);
+  border-color: rgba(103, 232, 249, .55);
+}
+
+.search-results {
+  background: #fff;
+  border-color: rgba(103, 232, 249, .35);
+}
+
+@media (max-width: 48em) {
+  .review-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .document-summary {
+    order: 0;
+    position: static;
+  }
+}

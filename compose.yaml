@@ -1,0 +1,154 @@
+name: datahub-document-enrichment
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.2
+    environment: { ZOOKEEPER_CLIENT_PORT: 2181, ZOOKEEPER_TICK_TIME: 2000 }
+    healthcheck: { test: ["CMD-SHELL", "echo srvr | nc zookeeper 2181"], interval: 5s, timeout: 5s, retries: 10 }
+
+  broker:
+    image: confluentinc/cp-kafka:7.9.2
+    depends_on: { zookeeper: { condition: service_healthy } }
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+    healthcheck: { test: ["CMD-SHELL", "nc -z broker 9092"], interval: 5s, timeout: 5s, retries: 15, start_period: 30s }
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.9.2
+    depends_on: { broker: { condition: service_healthy } }
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
+
+  mysql:
+    image: mysql:8.2
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_bin --default-authentication-plugin=mysql_native_password
+    environment: { MYSQL_DATABASE: datahub, MYSQL_USER: datahub, MYSQL_PASSWORD: datahub, MYSQL_ROOT_PASSWORD: datahub, MYSQL_ROOT_HOST: "%" }
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck: { test: ["CMD-SHELL", "mysqladmin ping -h mysql -u $$MYSQL_USER --password=$$MYSQL_PASSWORD"], interval: 5s, timeout: 5s, retries: 20 }
+
+  elasticsearch:
+    image: elasticsearch:7.16.1
+    environment: { discovery.type: single-node, xpack.security.enabled: "false", ES_JAVA_OPTS: -Xms512m -Xmx512m }
+    volumes: [search-data:/usr/share/elasticsearch/data]
+    healthcheck: { test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow"], interval: 5s, timeout: 5s, retries: 20 }
+
+  neo4j:
+    image: neo4j:4.4.9-community
+    environment: { NEO4J_AUTH: neo4j/datahub, NEO4J_dbms_allow__upgrade: "true" }
+    volumes: [neo4j-data:/data]
+    healthcheck: { test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null"], interval: 5s, timeout: 5s, retries: 20 }
+
+  kafka-setup:
+    # DataHub 1.6 did not publish a versioned kafka-setup image; this is the
+    # official setup helper image used by the Quickstart Compose file.
+    image: acryldata/datahub-kafka-setup:head
+    depends_on: { broker: { condition: service_healthy }, schema-registry: { condition: service_started } }
+    environment: { DATAHUB_PRECREATE_TOPICS: "false" }
+
+  datahub-upgrade:
+    image: acryldata/datahub-upgrade:v1.6.0
+    command: ["-u", "SystemUpdate"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      neo4j: { condition: service_healthy }
+      kafka-setup: { condition: service_completed_successfully }
+    environment: &datahub-env
+      EBEAN_DATASOURCE_DRIVER: com.mysql.jdbc.Driver
+      EBEAN_DATASOURCE_HOST: mysql:3306
+      EBEAN_DATASOURCE_USERNAME: datahub
+      EBEAN_DATASOURCE_PASSWORD: datahub
+      EBEAN_DATASOURCE_URL: jdbc:mysql://mysql:3306/datahub?useSSL=false
+      ELASTICSEARCH_HOST: elasticsearch
+      ELASTICSEARCH_PORT: 9200
+      ENTITY_REGISTRY_CONFIG_PATH: /datahub/datahub-gms/resources/entity-registry.yml
+      # Fixed development-only values: local Quickstart runs without authentication.
+      DATAHUB_TOKEN_SERVICE_SIGNING_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      DATAHUB_TOKEN_SERVICE_SALT: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      DATAHUB_SQL_SETUP_ENABLED: "true"
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      KAFKA_SCHEMAREGISTRY_URL: http://schema-registry:8081
+      NEO4J_HOST: http://neo4j:7474
+      NEO4J_URI: bolt://neo4j
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: datahub
+      METADATA_SERVICE_AUTH_ENABLED: "false"
+
+  datahub-gms:
+    image: acryldata/datahub-gms:v1.6.0
+    depends_on: { datahub-upgrade: { condition: service_completed_successfully } }
+    environment:
+      <<: *datahub-env
+      DATAHUB_SERVER_TYPE: quickstart
+      DATAHUB_TELEMETRY_ENABLED: "false"
+      GRAPH_SERVICE_IMPL: elasticsearch
+      MAE_CONSUMER_ENABLED: "true"
+      MCE_CONSUMER_ENABLED: "true"
+      PE_CONSUMER_ENABLED: "true"
+      ES_BULK_REFRESH_POLICY: NONE
+      JAVA_OPTS: -Xms1g -Xmx1g
+    ports: ["8080:8080"]
+    healthcheck: { test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health"], interval: 5s, timeout: 5s, retries: 20, start_period: 60s }
+
+  datahub-ui:
+    image: acryldata/datahub-frontend-react:v1.6.0
+    depends_on: { datahub-gms: { condition: service_healthy } }
+    environment:
+      DATAHUB_GMS_HOST: datahub-gms
+      DATAHUB_GMS_PORT: 8080
+      DATAHUB_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      DATAHUB_APP_VERSION: v1.6.0
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      ELASTIC_CLIENT_HOST: elasticsearch
+      ELASTIC_CLIENT_PORT: 9200
+    ports: ["9002:9002"]
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:latest
+    volumes: [./backend/db/migrations:/migrations:ro, app-data:/data]
+    environment: { DATABASE_URL: sqlite:/data/document_enrichment.db }
+    command: ["--migrations-dir", "/migrations", "up"]
+
+  seed-demo:
+    build: .
+    depends_on: { datahub-gms: { condition: service_healthy } }
+    environment: { DATAHUB_GMS_URL: http://datahub-gms:8080 }
+    command: ["uv", "run", "--directory", "backend", "--extra", "datahub", "python", "../scripts/seed_demo.py"]
+
+  api:
+    build: .
+    depends_on: { migrate: { condition: service_completed_successfully }, seed-demo: { condition: service_completed_successfully } }
+    environment:
+      DATAHUB_GMS_URL: http://datahub-gms:8080
+      DATAHUB_GRAPHQL_URL: http://datahub-gms:8080/api/graphql
+      DATAHUB_UI_URL: http://localhost:9002
+      DATABASE_PATH: /data/document_enrichment.db
+      CORS_ORIGINS: http://localhost:5173
+      DEMO_MODE: "true"
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-none}
+    volumes: [app-data:/data]
+    ports: ["8000:8000"]
+
+  app:
+    build: ./frontend
+    depends_on: { api: { condition: service_started } }
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8000
+    ports: ["5173:5173"]
+
+volumes:
+  mysql-data:
+  search-data:
+  neo4j-data:
+  app-data:

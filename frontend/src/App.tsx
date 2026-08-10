@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Center,
+  Checkbox,
   Container,
   FileInput,
   Group,
@@ -142,6 +143,7 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [loadingReview, setLoadingReview] = useState(Boolean(analysisId));
+  const [analysisProgress, setAnalysisProgress] = useState(12);
   const active =
     screen === "upload"
       ? 0
@@ -216,14 +218,20 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
       return;
     }
     setError(null);
+    setAnalysisProgress(8);
     setScreen("analyzing");
     try {
       const uploaded = await uploadDocument(file);
+      setAnalysisProgress(35);
       const ready = await getRecommendations(uploaded.id);
+      setAnalysisProgress(75);
       applyRecommendations(ready);
       const candidates = await getDatasetCandidates(uploaded.id);
+      setAnalysisProgress(95);
       setDatasetCandidates(candidates.items);
       setKeywordSearchDegraded(candidates.keyword_search_degraded);
+      setAnalysisProgress(100);
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
       setScreen("review");
     } catch (caught) {
       setError(
@@ -298,6 +306,7 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
   }
   return (
     <MantineProvider
+      forceColorScheme="light"
       theme={{
         primaryColor: "indigo",
         defaultRadius: "md",
@@ -380,7 +389,7 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
               />
             )}
             {!loadingReview && screen === "analyzing" && (
-              <AnalyzingPanel fileName={file?.name ?? "document"} />
+                <AnalyzingPanel fileName={file?.name ?? "document"} progress={analysisProgress} />
             )}
             {!loadingReview && screen === "review" && analysis && (
               <ReviewPanel
@@ -430,7 +439,7 @@ const workspaceTheme = {
 };
 function WorkspaceFrame({ children }: { children: React.ReactNode }) {
   return (
-    <MantineProvider theme={workspaceTheme}>
+    <MantineProvider theme={workspaceTheme} forceColorScheme="light">
       <Box className="app-shell">
         <Container size="lg" py={{ base: "xl", sm: 56 }}>
           <header className="app-header">
@@ -579,11 +588,18 @@ function DocumentsPage() {
                   variant="subtle"
                   color="dark"
                   p={0}
+                  h="auto"
                   justify="flex-start"
-                  style={{ flex: 1 }}
+                  className="document-row-link"
+                  style={{ flex: 1, minWidth: 0 }}
                 >
-                  <div>
-                    <Text fw={650}>{item.source_filename}</Text>
+                  <div className="document-row-copy">
+                    <Group gap="xs" wrap="nowrap" align="center">
+                      <Text fw={650}>{item.source_filename}</Text>
+                      <Badge color={freshnessColor(item.freshness_status)} variant="light">
+                        {item.freshness_status?.replaceAll("_", " ") ?? "NOT CHECKED"}
+                      </Badge>
+                    </Group>
                     <Text size="xs" c="dimmed" mt={3}>
                       {item.status.replaceAll("_", " ")} · Updated{" "}
                       {new Intl.DateTimeFormat(undefined, {
@@ -593,13 +609,6 @@ function DocumentsPage() {
                   </div>
                 </Button>
                 <Group gap="xs">
-                  <Badge
-                    color={freshnessColor(item.freshness_status)}
-                    variant="light"
-                  >
-                    {item.freshness_status?.replaceAll("_", " ") ??
-                      "NOT CHECKED"}
-                  </Badge>
                   <Tooltip label={item.status === "PUBLISHED" ? "Delete from workspace and DataHub" : "Delete draft"}>
                     <Button
                       variant="subtle"
@@ -613,7 +622,6 @@ function DocumentsPage() {
                       <IconTrash size={17} />
                     </Button>
                   </Tooltip>
-                  <IconArrowRight size={16} />
                 </Group>
               </Group>
             </Card>
@@ -862,7 +870,7 @@ function UploadPanel({
     </Card>
   );
 }
-function AnalyzingPanel({ fileName }: { fileName: string }) {
+function AnalyzingPanel({ fileName, progress }: { fileName: string; progress: number }) {
   return (
     <Card className="surface-card" padding="xl" withBorder>
       <Center>
@@ -879,8 +887,9 @@ function AnalyzingPanel({ fileName }: { fileName: string }) {
             </Text>
           </div>
           <Progress
-            value={68}
+            value={progress}
             animated
+            transitionDuration={400}
             w={260}
             aria-label="Analysis in progress"
           />
@@ -964,8 +973,8 @@ function ReviewPanel({
           against the source before saving.
         </Text>
       </aside>
-      <section aria-label="Metadata review">
-        <Group justify="space-between" mb="md" align="end">
+      <section className="review-content" aria-label="Metadata review">
+        <Group className="recommendation-heading" justify="space-between" mb="md" align="end">
           <div>
             <Text className="eyebrow">RECOMMENDATIONS</Text>
             <Title order={2} size="h3" mt={6}>
@@ -1071,15 +1080,14 @@ function ReviewCard({
     setQuery("");
     setResults([]);
   }
-  function selectRecommended() {
-    if (!multi) return;
-    onChange(
-      [...selected, ...recommended.map(toRecommended)]
-        .filter((item, index, items) => items.findIndex((candidate) => candidate.urn === item.urn) === index)
-        .slice(0, MAX_MULTI_SELECTION),
-    );
-  }
-  const unselectedCandidates = candidates.filter((item) => !selected.some((selection) => selection.urn === item.urn));
+  const unselectedRecommended = recommended.filter(
+    (item) => !selected.some((selection) => selection.urn === item.urn),
+  );
+  const unselectedCandidates = candidates.filter(
+    (item) =>
+      !selected.some((selection) => selection.urn === item.urn) &&
+      !recommended.some((recommendation) => recommendation.urn === item.urn),
+  );
   const visibleCandidates = expanded ? unselectedCandidates : unselectedCandidates.slice(0, 5);
   return (
     <Card className="surface-card review-card" withBorder padding="lg">
@@ -1095,17 +1103,11 @@ function ReviewCard({
         {multi && (
           <Group gap={4}>
             <Badge variant="light" color={selected.length === MAX_MULTI_SELECTION ? "orange" : "gray"}>{selected.length} / {MAX_MULTI_SELECTION}</Badge>
-            {recommended.length > 0 && <Button size="compact-xs" variant="subtle" onClick={selectRecommended}>Select recommended</Button>}
             {selected.length > 0 && <Button size="compact-xs" variant="subtle" color="gray" onClick={() => onChange([])}>Clear all</Button>}
           </Group>
         )}
       </Group>
       <Stack gap="xs">
-        {selected.length === 0 && (
-          <Text c="dimmed" size="sm" className="empty-state">
-            No selection — search the catalog to add one.
-          </Text>
-        )}
         {selected.map((item) => (
           <SelectedItem
             key={item.urn}
@@ -1116,6 +1118,19 @@ function ReviewCard({
           />
         ))}
       </Stack>
+      {multi && unselectedRecommended.length > 0 && (
+        <Stack gap={4} mt="sm">
+          <Text size="xs" c="dimmed">Recommended</Text>
+          {unselectedRecommended.map((item) => (
+            <RecommendationOption
+              key={item.urn}
+              item={item}
+              disabled={selected.length >= MAX_MULTI_SELECTION}
+              onSelect={() => addSelection(toRecommended(item))}
+            />
+          ))}
+        </Stack>
+      )}
       {kind === "datasets" && unselectedCandidates.length > 0 && (
         <Stack gap={4} mt="sm">
           <Text size="xs" c="dimmed">
@@ -1326,18 +1341,11 @@ function SelectedItem({
             {item.detail || item.urn}
           </Text>
         </div>
-        <Tooltip label="Remove selection">
-          <Button
-            variant="subtle"
-            color="gray"
-            aria-label={`Remove ${item.name}`}
-            p={5}
-            h="auto"
-            onClick={onRemove}
-          >
-            <IconTrash size={15} />
-          </Button>
-        </Tooltip>
+        <Checkbox
+          checked
+          aria-label={`Select ${item.name}`}
+          onChange={onRemove}
+        />
       </Group>
       {item.recommendation && (
         <>
@@ -1366,6 +1374,31 @@ function SelectedItem({
         </>
       )}
     </div>
+  );
+}
+
+function RecommendationOption({
+  item,
+  disabled,
+  onSelect,
+}: {
+  item: Recommendation;
+  disabled: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="recommendation-option"
+      disabled={disabled}
+      onClick={onSelect}
+    >
+      <span>
+        <strong>{item.display_name}</strong>
+        <small>{item.reason}</small>
+      </span>
+      <Checkbox checked={false} readOnly aria-label={`Select ${item.display_name}`} />
+    </button>
   );
 }
 function PreviewEntity({ label, item, empty }: { label: string; item: SelectionItem | null; empty: string }) {

@@ -2,7 +2,28 @@
 
 Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT document. This repository implements the demo metadata, read-only catalog, deterministic retrieval, constrained LLM ranking, workflow/review API, and safe DataHub Document publishing (implementation-plan phases 1–5 and 7).
 
-## Quick start
+## Docker demo (recommended for judges)
+
+With Docker Desktop running, start the complete demo (DataHub, demo metadata,
+API, and UI) with one command:
+
+```sh
+docker compose up --build
+```
+
+Wait for the `seed-demo` container to complete, then open
+<http://localhost:5173>. DataHub itself is available at
+<http://localhost:9002>. The Docker demo uses deterministic rule-based
+recommendations when no LLM credentials are supplied, so it is usable without
+an API key. To erase all Docker demo data, run `docker compose down -v`.
+
+To use your own OpenAI-compatible model locally, add `LLM_API_KEY` and
+`LLM_MODEL` to the untracked `.env` file, then restart the API with
+`docker compose up -d --force-recreate api`. The Compose file passes these
+values only to the local API container; `.env` is gitignored and must not be
+committed.
+
+## Local development
 
 1. Copy `.env.example` to `.env` and point it at a running local DataHub v1.6.0 instance.
 2. Install dbmate: `brew install dbmate`.

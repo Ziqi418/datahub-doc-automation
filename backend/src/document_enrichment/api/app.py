@@ -98,9 +98,11 @@ def get_gateway(request: Request) -> DataHubCatalogGateway:
     return request.app.state.catalog_gateway
 
 
-def get_llm_provider(request: Request) -> LLMProvider:
+def get_llm_provider(request: Request) -> LLMProvider | None:
     provider = request.app.state.llm_provider
     if provider is None:
+        if request.app.state.settings.demo_mode:
+            return None
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="LLM is not configured; set LLM_API_KEY and LLM_MODEL",
@@ -127,6 +129,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.settings = app_settings
         store = SQLiteAnalysisStore(app_settings.database_path)
         store.initialize()
         app.state.store = store
@@ -244,7 +247,7 @@ def create_app(
         analysis_id: str,
         store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
         gateway: Annotated[DataHubCatalogGateway, Depends(get_gateway)],
-        provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+        provider: Annotated[LLMProvider | None, Depends(get_llm_provider)],
     ) -> AnalysisRecord:
         try:
             record = store.transition(analysis_id, AnalysisStatus.ANALYZING)
@@ -253,13 +256,18 @@ def create_app(
             candidates, _ = await _retrieve_dataset_candidates(
                 content, record.source_filename, snapshot, gateway
             )
-            recommendations = await recommend_with_llm(
-                provider=provider,
-                text=content,
-                catalog=snapshot,
-                rule_recommendations=recommend_rules(content, record.source_filename, snapshot),
-                dataset_candidates=candidates,
-            )
+            rule_recommendations = recommend_rules(content, record.source_filename, snapshot)
+            if provider is None:
+                recommendations = rule_recommendations
+                recommendations.provider = "demo-rules"
+            else:
+                recommendations = await recommend_with_llm(
+                    provider=provider,
+                    text=content,
+                    catalog=snapshot,
+                    rule_recommendations=rule_recommendations,
+                    dataset_candidates=candidates,
+                )
             return store.save_recommendations(analysis_id, recommendations)
         except AnalysisNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Analysis not found") from exc

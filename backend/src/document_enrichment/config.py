@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=60, ge=1, le=120)
     llm_max_output_tokens: int = Field(default=8_000, ge=100, le=16_000)
     llm_reasoning_effort: Literal["none", "low", "high", "max"] = "none"
+    demo_mode: bool = False
     http_timeout_seconds: float = Field(default=15, ge=1, le=60)
     max_upload_bytes: int = 256 * 1024
     max_document_characters: int = 30_000
