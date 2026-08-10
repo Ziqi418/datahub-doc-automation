@@ -6,7 +6,7 @@ export interface DatasetCandidatesResponse { items: Recommendation[]; keyword_se
 export interface Analysis { id: string; source_filename: string; character_count: number; status: string; recommendations: RecommendationSet | null; final_selection?: ReviewDraftSelection | null; error_code: string | null; review_started_at: string | null; review_completed_at: string | null; updated_at: string; freshness_status?: string | null; last_freshness_checked_at?: string | null; freshness_evidence?: FreshnessEvidence[] }
 export interface CatalogItem { urn: string; name: string; description: string; qualified_name: string | null; owner_type: string | null; title: string | null }
 export interface SelectionItem { urn: string; name: string; detail?: string; recommendation?: Recommendation; userSelected?: boolean }
-export interface ReviewSelection { domain_urn: string | null; tag_urns: string[]; owner_urn: string | null; dataset_urns: string[] }
+export interface ReviewSelection { domain_urns: string[]; tag_urns: string[]; owner_urns: string[]; dataset_urns: string[] }
 export interface FieldDisposition { reference_id: string; action: "accept_suggestion" | "map_dataset" | "business_term" | "keep_unresolved"; dataset_urn?: string | null }
 export interface ReviewDraftSelection extends ReviewSelection { field_dispositions: FieldDisposition[] }
 export interface FieldSuggestion { reference_id: string; dataset_urn: string; confidence: number; reason: string }
