@@ -2,6 +2,75 @@
 
 Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT document. This repository implements the demo metadata, read-only catalog, deterministic retrieval, constrained LLM ranking, workflow/review API, and safe DataHub Document publishing (implementation-plan phases 1–5 and 7).
 
+## What it does
+
+Documentation often describes important data assets without being connected to
+the catalog that governs them. DataHub Document Enrichment Agent closes that
+gap: it analyzes a Markdown or text document, finds relevant metadata already
+stored in DataHub, and proposes the relationships for a human to review before
+anything is published.
+
+### Features and functionality
+
+- **Document analysis:** uploads UTF-8 Markdown or plain-text documents and
+  extracts candidate datasets, schema fields, glossary terms, tags, domains,
+  and owners.
+- **Catalog-grounded recommendations:** searches a read-only DataHub catalog
+  using deterministic rules, with an optional constrained LLM ranking step.
+  Every LLM suggestion is validated against the retrieved DataHub candidates.
+- **Human-in-the-loop review:** exposes a review workflow/API so a reviewer can
+  accept, remove, or resolve recommendations and conflicts before publishing.
+- **Safe Document publishing:** creates an `UNPUBLISHED` native DataHub
+  Document, verifies the selected metadata by read-back, then publishes using
+  a stable URN so retries remain idempotent.
+- **Metadata-change awareness:** a read-only freshness endpoint compares the
+  published document's tracked baseline with related datasets and marks it
+  `NEEDS_REVIEW` if a dataset disappears or its schema/metadata changes.
+- **Local, repeatable demo:** Docker Compose brings up DataHub, seed data, the
+  API, and the web UI together. Rule-based recommendations work without an
+  LLM API key.
+
+### How it works
+
+1. A user uploads a `.md` or `.txt` business document.
+2. The backend extracts references and retrieves a bounded set of matching
+   DataHub assets.
+3. Rules—and, when configured, an OpenAI-compatible model—rank the matches.
+4. The user reviews the recommendations and resolves any conflicts.
+5. The approved result is published as a native DataHub Document and can later
+   be checked for metadata freshness.
+
+## Technology stack
+
+- **Backend:** Python 3.11, FastAPI, Pydantic, `uv`, and SQLite with versioned
+  `dbmate` migrations.
+- **Data catalog:** DataHub 1.6.0, accessed through read-only GraphQL catalog
+  queries for retrieval and DataHub's native Document publishing APIs.
+- **Recommendation layer:** deterministic Python rules plus an optional
+  OpenAI-compatible LLM integration, with schema validation and candidate
+  grounding safeguards.
+- **Frontend:** React, TypeScript, Vite, Mantine, and Tabler icons; tested with
+  Vitest, Testing Library, and Playwright.
+- **Infrastructure:** Docker Compose orchestrates DataHub and its supporting
+  Kafka, Schema Registry, MySQL, Elasticsearch, and Neo4j services alongside
+  the application.
+
+## Demo data
+
+The included demo uses a fixed `jaffle_shop` production namespace. It seeds
+eleven representative retail datasets—such as `customers`, `orders`,
+`payments`, `refunds`, `fct_orders`, and `daily_sales`—with schemas,
+descriptions, domains, owners, and tags. The catalog includes the Finance,
+Customer, and Operations domains; Finance Analytics, Customer Analytics, and
+Data Platform teams; and tags for revenue, payments, PII, data quality,
+runbooks, policies, and sales.
+
+Eight Markdown documents model common data-documentation use cases, including
+revenue recognition, customer PII policy, payment failure runbooks, refund
+reconciliation, data quality, and sales operations. Gold YAML annotations and
+manual-validation scenarios are included to evaluate recommendation quality,
+schema resolution, conflict review, and freshness baselines.
+
 ## Docker demo (recommended for judges)
 
 With Docker Desktop running, start the complete demo (DataHub, demo metadata,
