@@ -131,8 +131,8 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
   const [screen, setScreen] = useState<Screen>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [domain, setDomain] = useState<SelectionItem | null>(null);
-  const [owner, setOwner] = useState<SelectionItem | null>(null);
+  const [domains, setDomains] = useState<SelectionItem[]>([]);
+  const [owners, setOwners] = useState<SelectionItem[]>([]);
   const [tags, setTags] = useState<SelectionItem[]>([]);
   const [datasets, setDatasets] = useState<SelectionItem[]>([]);
   const [datasetCandidates, setDatasetCandidates] = useState<Recommendation[]>(
@@ -155,8 +155,8 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
   function applyRecommendations(next: Analysis) {
     const recs = next.recommendations;
     setAnalysis(next);
-    setDomain(recs?.domain && isDatasetBackedRecommendation(recs.domain) ? toRecommended(recs.domain) : null);
-    setOwner(recs?.owner && isDatasetBackedRecommendation(recs.owner) ? toRecommended(recs.owner) : null);
+    setDomains(recs?.domain && isDatasetBackedRecommendation(recs.domain) ? [toRecommended(recs.domain)] : []);
+    setOwners(recs?.owner && isDatasetBackedRecommendation(recs.owner) ? [toRecommended(recs.owner)] : []);
     setTags([]);
     setDatasets(recs?.datasets.filter(isSqlDatasetRecommendation).map(toRecommended) ?? []);
   }
@@ -179,8 +179,8 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
         const draft = saved.final_selection;
         if (draft) {
           setAnalysis(saved);
-          setDomain(draft.domain_urn ? savedSelectionItem(draft.domain_urn, [saved.recommendations.domain].filter(Boolean) as Recommendation[]) : null);
-          setOwner(draft.owner_urn ? savedSelectionItem(draft.owner_urn, [saved.recommendations.owner].filter(Boolean) as Recommendation[]) : null);
+          setDomains(draft.domain_urns.map((urn) => savedSelectionItem(urn, [saved.recommendations!.domain].filter(Boolean) as Recommendation[])));
+          setOwners(draft.owner_urns.map((urn) => savedSelectionItem(urn, [saved.recommendations!.owner].filter(Boolean) as Recommendation[])));
           setTags(draft.tag_urns.map((urn) => savedSelectionItem(urn, saved.recommendations!.tags)));
           setDatasets(draft.dataset_urns.map((urn) => savedSelectionItem(urn, saved.recommendations!.datasets)));
           setFieldDispositions(draft.field_dispositions);
@@ -243,7 +243,7 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
     }
   }
   function currentSelection() {
-    return { domain_urn: domain?.urn ?? null, tag_urns: tags.map((x) => x.urn), owner_urn: owner?.urn ?? null,
+    return { domain_urns: domains.map((x) => x.urn), tag_urns: tags.map((x) => x.urn), owner_urns: owners.map((x) => x.urn),
       dataset_urns: datasets.map((x) => x.urn), field_dispositions: fieldDispositions };
   }
   async function submitReview() {
@@ -282,8 +282,8 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
     setScreen("upload");
     setFile(null);
     setAnalysis(null);
-    setDomain(null);
-    setOwner(null);
+    setDomains([]);
+    setOwners([]);
     setTags([]);
     setDatasets([]);
     setDatasetCandidates([]);
@@ -394,16 +394,16 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
             {!loadingReview && screen === "review" && analysis && (
               <ReviewPanel
                 analysis={analysis}
-                domain={domain}
-                owner={owner}
+                domains={domains}
+                owners={owners}
                 tags={tags}
                 datasets={datasets}
                 datasetCandidates={datasetCandidates}
                 recommendedTags={analysis.recommendations?.tags ?? []}
                 recommendedDatasets={analysis.recommendations?.datasets ?? []}
                 keywordSearchDegraded={keywordSearchDegraded}
-                onDomainChange={setDomain}
-                onOwnerChange={setOwner}
+                onDomainsChange={setDomains}
+                onOwnersChange={setOwners}
                 onTagsChange={setTags}
                 onDatasetsChange={setDatasets}
                 fieldDispositions={fieldDispositions}
@@ -416,8 +416,8 @@ export function Workflow({ analysisId }: { analysisId?: string }) {
             {!loadingReview && screen === "result" && analysis && (
               <ResultPanel
                 analysis={analysis}
-                domain={domain}
-                owner={owner}
+                domain={domains[0] ?? null}
+                owner={owners[0] ?? null}
                 tags={tags}
                 datasets={datasets}
                 onRestart={restart}
@@ -917,16 +917,16 @@ function ReviewLoadingPanel() {
 }
 function ReviewPanel({
   analysis,
-  domain,
-  owner,
+  domains,
+  owners,
   tags,
   datasets,
   datasetCandidates,
   recommendedTags,
   recommendedDatasets,
   keywordSearchDegraded,
-  onDomainChange,
-  onOwnerChange,
+  onDomainsChange,
+  onOwnersChange,
   onTagsChange,
   onDatasetsChange,
   fieldDispositions,
@@ -936,16 +936,16 @@ function ReviewPanel({
   isSaving,
 }: {
   analysis: Analysis;
-  domain: SelectionItem | null;
-  owner: SelectionItem | null;
+  domains: SelectionItem[];
+  owners: SelectionItem[];
   tags: SelectionItem[];
   datasets: SelectionItem[];
   datasetCandidates: Recommendation[];
   recommendedTags: Recommendation[];
   recommendedDatasets: Recommendation[];
   keywordSearchDegraded: boolean;
-  onDomainChange: (x: SelectionItem | null) => void;
-  onOwnerChange: (x: SelectionItem | null) => void;
+  onDomainsChange: (x: SelectionItem[]) => void;
+  onOwnersChange: (x: SelectionItem[]) => void;
   onTagsChange: (x: SelectionItem[]) => void;
   onDatasetsChange: (x: SelectionItem[]) => void;
   fieldDispositions: FieldDisposition[];
@@ -994,13 +994,13 @@ function ReviewPanel({
         <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
           <ReviewCard
             kind="domains"
-            selected={domain ? [domain] : []}
-            onChange={(x) => onDomainChange(x[0] ?? null)}
+            selected={domains}
+            onChange={onDomainsChange}
           />
           <ReviewCard
             kind="owners"
-            selected={owner ? [owner] : []}
-            onChange={(x) => onOwnerChange(x[0] ?? null)}
+            selected={owners}
+            onChange={onOwnersChange}
           />
           <ReviewCard kind="tags" selected={tags} recommended={recommendedTags} onChange={onTagsChange} />
           <ReviewCard
@@ -1013,7 +1013,7 @@ function ReviewPanel({
         </SimpleGrid>
         <ReviewIntelligence
           analysis={analysis}
-          selection={{ domain_urn: domain?.urn ?? null, owner_urn: owner?.urn ?? null, tag_urns: tags.map((item) => item.urn), dataset_urns: datasets.map((item) => item.urn), field_dispositions: fieldDispositions }}
+          selection={{ domain_urns: domains.map((item) => item.urn), owner_urns: owners.map((item) => item.urn), tag_urns: tags.map((item) => item.urn), dataset_urns: datasets.map((item) => item.urn), field_dispositions: fieldDispositions }}
           fieldDispositions={fieldDispositions}
           onFieldDispositionsChange={onFieldDispositionsChange}
         />
@@ -1040,7 +1040,7 @@ function ReviewCard({
   recommended?: Recommendation[];
   onChange: (x: SelectionItem[]) => void;
 }) {
-  const multi = kind === "tags" || kind === "datasets";
+  const multi = true;
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [debouncedQuery] = useDebouncedValue(query, 300);
@@ -1080,6 +1080,14 @@ function ReviewCard({
     setQuery("");
     setResults([]);
   }
+  function selectAll() {
+    const all = [...selected, ...recommended.map(toRecommended), ...candidates.map(toRecommended)];
+    onChange(
+      all
+        .filter((item, index, items) => items.findIndex((candidate) => candidate.urn === item.urn) === index)
+        .slice(0, MAX_MULTI_SELECTION),
+    );
+  }
   const unselectedRecommended = recommended.filter(
     (item) => !selected.some((selection) => selection.urn === item.urn),
   );
@@ -1103,6 +1111,9 @@ function ReviewCard({
         {multi && (
           <Group gap={4}>
             <Badge variant="light" color={selected.length === MAX_MULTI_SELECTION ? "orange" : "gray"}>{selected.length} / {MAX_MULTI_SELECTION}</Badge>
+            {(recommended.length > 0 || candidates.length > 0) && (
+              <Button size="compact-xs" variant="subtle" onClick={selectAll}>Select all</Button>
+            )}
             {selected.length > 0 && <Button size="compact-xs" variant="subtle" color="gray" onClick={() => onChange([])}>Clear all</Button>}
           </Group>
         )}
@@ -1221,7 +1232,7 @@ function ReviewIntelligence({
   onFieldDispositionsChange,
 }: {
   analysis: Analysis;
-  selection: { domain_urn: string | null; owner_urn: string | null; tag_urns: string[]; dataset_urns: string[]; field_dispositions: FieldDisposition[] };
+  selection: { domain_urns: string[]; owner_urns: string[]; tag_urns: string[]; dataset_urns: string[]; field_dispositions: FieldDisposition[] };
   fieldDispositions: FieldDisposition[];
   onFieldDispositionsChange: (items: FieldDisposition[]) => void;
 }) {
@@ -1290,12 +1301,13 @@ function ReviewIntelligence({
       </Card>
       <Card className="surface-card" withBorder padding="lg">
         <Group justify="space-between" align="start" wrap="wrap">
-          <div><Text fw={650}>Similar documents</Text><Text size="sm" c="dimmed">Candidates are recalled by rules, then classified semantically in one batch.</Text></div>
+          <div><Text fw={650}>AI similarity comparison</Text><Text size="sm" c="dimmed">AI compares rule-recalled documents for semantic similarity and potential conflicts.</Text></div>
           <Group gap="xs"><Button variant="default" loading={checkingConflicts} onClick={() => void checkSimilarDocuments()}>Check similar documents</Button>{conflicts && conflicts.some((item) => !ignoredConflictUrns.includes(item.document_urn)) && <Button variant="light" onClick={() => setIgnoredConflictUrns(conflicts.map((item) => item.document_urn))}>Ignore all</Button>}</Group>
         </Group>
         {conflicts && <Stack mt="md" gap="xs">
           {conflicts.filter((item) => !ignoredConflictUrns.includes(item.document_urn)).length === 0 ? <Text size="sm" c="dimmed">No active similar-document candidates.</Text> : conflicts.filter((item) => !ignoredConflictUrns.includes(item.document_urn)).map((item) => <Alert key={item.document_urn} color={item.high_risk ? "orange" : "blue"}>
             <Group gap="xs"><Text fw={600} size="sm">{item.title}</Text><Badge variant="light">{item.semantic_classification}</Badge>{item.semantic_confidence !== null && <Tooltip label="Model confidence in this classification, not a duplicate-risk score."><Badge variant="outline" color="gray">{Math.round(item.semantic_confidence * 100)}% classification confidence</Badge></Tooltip>}</Group>
+            <Text size="xs" fw={700} c="indigo" mt="xs">AI explanation</Text>
             <Text size="sm">{item.semantic_reason ?? "Awaiting semantic review; shared datasets alone are not a conflict."}</Text>
             <Button size="compact-xs" variant="light" mt="xs" onClick={() => setIgnoredConflictUrns((items) => [...items, item.document_urn])}>Ignore</Button>
           </Alert>)}
@@ -1505,7 +1517,7 @@ function ResultPanel({
         Review the metadata that will be sent to DataHub. Nothing is written
         until you explicitly publish.
       </Text>
-      <SimpleGrid cols={{ base: 1, sm: 3 }} mt="xl" spacing="sm">
+      <SimpleGrid className="result-status-grid" cols={{ base: 1, sm: 3 }} mt="xl" spacing="sm">
         <div className="result-detail">
           <Text size="xs" c="dimmed">
             STATUS
@@ -1538,22 +1550,24 @@ function ResultPanel({
       )}
       {!publishedUrl && (
         <Card withBorder padding="lg" mt="lg" className="publishing-preview">
-          <Group justify="space-between" align="start" wrap="wrap">
+          <Group className="publishing-preview-heading" justify="space-between" align="start" wrap="wrap">
             <div><Text className="eyebrow">DATAHUB PAYLOAD</Text><Text fw={650} size="lg" mt={3}>Publishing preview</Text><Text size="sm" c="dimmed" mt={4}>These are the associations that will be written to the document.</Text></div>
             <Badge size="lg" variant="light">{datasets.length} datasets · {tags.length} tags</Badge>
           </Group>
-          <SimpleGrid cols={{ base: 1, sm: 2 }} mt="lg" spacing="md">
+          <SimpleGrid className="preview-entity-grid" cols={{ base: 1, sm: 2 }} mt="lg" spacing="md">
             <PreviewEntity label="Domain" item={domain} empty="No domain selected" />
             <PreviewEntity label="Owner" item={owner} empty="No owner selected" />
+            <Card withBorder padding="md">
+              <Text size="xs" fw={700} c="dimmed">TAGS</Text>
+              <Group gap="xs" mt={8}>{tags.length ? tags.map((item) => <Badge key={item.urn} variant="light" color="indigo">{item.name}</Badge>) : <Text size="sm" c="dimmed">No tags selected</Text>}</Group>
+              <Text size="xs" c="dimmed" mt={10}>Confirmed in Review</Text>
+            </Card>
+            <Card withBorder padding="md">
+              <Group justify="space-between" align="center"><Text size="xs" fw={700} c="dimmed">RELATED DATASETS</Text><Badge variant="outline" color="gray">{datasets.length}</Badge></Group>
+              {datasets.length ? <Stack gap={4} mt={8}>{datasets.map((item) => <Text key={item.urn} fw={650} size="sm">{item.name}</Text>)}</Stack> : <Text size="sm" c="dimmed" mt={8}>No datasets selected</Text>}
+              <Text size="xs" c="dimmed" mt={10}>Confirmed in Review</Text>
+            </Card>
           </SimpleGrid>
-          <div className="preview-section">
-            <Text size="xs" fw={700} c="dimmed">TAGS</Text>
-            <Group gap="xs" mt={7}>{tags.length ? tags.map((item) => <Badge key={item.urn} variant="light" color="indigo">{item.name}</Badge>) : <Text size="sm" c="dimmed">No tags selected</Text>}</Group>
-          </div>
-          <div className="preview-section">
-            <Group justify="space-between"><Text size="xs" fw={700} c="dimmed">RELATED DATASETS</Text><Badge variant="outline" color="gray">{datasets.length}</Badge></Group>
-            {datasets.length ? <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm" mt="md">{datasets.map((item) => <Card key={item.urn} withBorder padding="md"><Text fw={650} size="sm">{item.name}</Text><Text size="xs" c="dimmed" mt={5}>Confirmed in Review</Text></Card>)}</SimpleGrid> : <Text size="sm" c="dimmed" mt="sm">No datasets selected</Text>}
-          </div>
         </Card>
       )}
       {validation && (
@@ -1725,7 +1739,7 @@ function ResultPanel({
       )}
       {!publishedUrl && (
         <>
-          <Group mt="xl">
+          <Group className="result-actions" mt="xl">
             <Button
               leftSection={<IconArrowLeft size={16} />}
               variant="default"
@@ -1749,9 +1763,11 @@ function ResultPanel({
           </Group>
         </>
       )}
-      <Button variant="default" mt="xl" ml="sm" onClick={onRestart}>
-        Review another document
-      </Button>
+      <Group className="result-actions" mt="md">
+        <Button variant="default" onClick={onRestart}>
+          Review another document
+        </Button>
+      </Group>
     </Card>
   );
 }

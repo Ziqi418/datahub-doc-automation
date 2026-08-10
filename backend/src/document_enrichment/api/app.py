@@ -1168,8 +1168,8 @@ def _validate_selection(selection: ReviewSelection, snapshot) -> None:
         "dataset": {item.urn for item in snapshot.datasets},
     }
     expected = [
-        ("domain", selection.domain_urn),
-        ("owner", selection.owner_urn),
+        *[("domain", urn) for urn in selection.domain_urns],
+        *[("owner", urn) for urn in selection.owner_urns],
         *[("tag", urn) for urn in selection.tag_urns],
         *[("dataset", urn) for urn in selection.dataset_urns],
     ]
@@ -1197,13 +1197,13 @@ def _review_actions(
         (
             EntityType.DOMAIN,
             [recommendations.domain.urn] if recommendations.domain else [],
-            [selection.domain_urn] if selection.domain_urn else [],
+            selection.domain_urns,
         ),
         (EntityType.TAG, [item.urn for item in recommendations.tags], selection.tag_urns),
         (
             EntityType.OWNER,
             [recommendations.owner.urn] if recommendations.owner else [],
-            [selection.owner_urn] if selection.owner_urn else [],
+            selection.owner_urns,
         ),
         (
             EntityType.DATASET,

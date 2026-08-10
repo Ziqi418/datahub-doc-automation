@@ -75,7 +75,7 @@ class DataHubDocumentPublisher:
         selection: ReviewSelection,
     ) -> PublishedDocument:
         try:
-            from datahub.metadata.schema_classes import DocumentStateClass
+            from datahub.metadata.schema_classes import DocumentStateClass, DomainsClass
             from datahub.sdk import DataHubClient, Document
         except ImportError as exc:  # pragma: no cover - installation issue
             raise PublishError("DataHub SDK is not installed; install the datahub extra") from exc
@@ -92,8 +92,10 @@ class DataHubDocumentPublisher:
         }
         document = Document.create_document(
             id=document_id, title=title, text=content, status=DocumentStateClass.UNPUBLISHED,
-            related_assets=selection.dataset_urns, owners=[selection.owner_urn] if selection.owner_urn else None,
-            tags=selection.tag_urns, domain=selection.domain_urn, custom_properties=properties,
+            related_assets=selection.dataset_urns, owners=selection.owner_urns or None,
+            tags=selection.tag_urns, domain=selection.domain_urns[0] if selection.domain_urns else None,
+            extra_aspects=[DomainsClass(domains=selection.domain_urns)] if selection.domain_urns else None,
+            custom_properties=properties,
         )
         client = DataHubClient(server=str(self.settings.datahub_gms_url), token=self.settings.datahub_token)
         try:
@@ -129,11 +131,11 @@ def _verify(document: object, title: str, content: str, selection: ReviewSelecti
         raise PublishVerificationError("DataHub read-back did not preserve document title or body")
     if getattr(document, "status", None) != expected_status:
         raise PublishVerificationError("DataHub read-back returned an unexpected document status")
-    if str(getattr(document, "domain", None) or "") != (selection.domain_urn or ""):
+    if selection.domain_urns and str(getattr(document, "domain", None) or "") not in selection.domain_urns:
         raise PublishVerificationError("DataHub read-back did not preserve document domain")
     if values("tags") != set(selection.tag_urns):
         raise PublishVerificationError("DataHub read-back did not preserve document tags")
-    if values("owners") != ({selection.owner_urn} if selection.owner_urn else set()):
+    if values("owners") != set(selection.owner_urns):
         raise PublishVerificationError("DataHub read-back did not preserve document owner")
     if values("related_assets") != set(selection.dataset_urns):
         raise PublishVerificationError("DataHub read-back did not preserve related datasets")

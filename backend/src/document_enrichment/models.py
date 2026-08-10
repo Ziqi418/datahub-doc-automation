@@ -120,13 +120,13 @@ class FieldDisposition(BaseModel):
 
 
 class ReviewSelection(BaseModel):
-    domain_urn: str | None = None
+    domain_urns: list[str] = Field(default_factory=list, max_length=20)
     tag_urns: list[str] = Field(default_factory=list, max_length=20)
-    owner_urn: str | None = None
+    owner_urns: list[str] = Field(default_factory=list, max_length=20)
     dataset_urns: list[str] = Field(default_factory=list, max_length=20)
     field_dispositions: list[FieldDisposition] = Field(default_factory=list)
 
-    @field_validator("tag_urns", "dataset_urns")
+    @field_validator("domain_urns", "tag_urns", "owner_urns", "dataset_urns")
     @classmethod
     def no_duplicates(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):

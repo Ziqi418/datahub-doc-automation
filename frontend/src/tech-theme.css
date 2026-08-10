@@ -44,6 +44,59 @@ body {
   width: min(100%, 820px);
 }
 
+.result-card {
+  width: min(100%, 1080px);
+  max-width: 1080px;
+  margin-inline: auto;
+}
+
+.result-card > .mantine-Title-root,
+.result-card > .mantine-Text-root,
+.result-card > .mantine-ThemeIcon-root {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.result-card > .mantine-ThemeIcon-root {
+  display: flex;
+}
+
+.result-status-grid {
+  max-width: 900px;
+  margin-inline: auto;
+}
+
+.result-detail {
+  min-height: 112px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.publishing-preview {
+  max-width: 900px;
+  margin-inline: auto;
+}
+
+.publishing-preview-heading {
+  justify-content: center;
+  text-align: center;
+}
+
+.preview-entity-grid {
+  max-width: 720px;
+  margin-inline: auto;
+}
+
+.preview-section {
+  max-width: 720px;
+  margin: 1.5rem auto 0;
+}
+
+.result-actions {
+  justify-content: center;
+}
+
 .recommendation-heading {
   justify-content: center;
   text-align: center;
