@@ -443,9 +443,12 @@ def _merge_and_validate(
         )
 
     return RecommendationSet(
-        domain=convert(ranked.domain, "domain") if ranked.domain else None,
+        # A Domain or Owner inherited from a matched Dataset is catalog fact, not
+        # a semantic guess.  Keep it when available; the model remains a fallback
+        # for documents without a Dataset-backed association.
+        domain=rules.domain or (convert(ranked.domain, "domain") if ranked.domain else None),
         tags=[convert(item, "tag") for item in ranked.tags],
-        owner=convert(ranked.owner, "owner") if ranked.owner else None,
+        owner=rules.owner or (convert(ranked.owner, "owner") if ranked.owner else None),
         datasets=[convert(item, "dataset") for item in ranked.datasets],
     )
 

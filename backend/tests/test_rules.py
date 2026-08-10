@@ -35,6 +35,44 @@ def test_short_name_collision_is_retained() -> None:
     )
 
 
+def test_field_names_do_not_recommend_related_datasets() -> None:
+    catalog = CatalogSnapshot(
+        datasets=[
+            Dataset(
+                urn="urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)",
+                name="fct_orders",
+                qualified_name="fct_orders",
+                schema_fields=["net_revenue", "order_id"],
+            )
+        ]
+    )
+
+    candidates = dataset_candidates(
+        "Validate the net_revenue field for Finance reporting.", "report.md", catalog
+    )
+
+    assert candidates == []
+
+
+def test_description_keywords_do_not_recommend_related_datasets() -> None:
+    catalog = CatalogSnapshot(
+        datasets=[
+            Dataset(
+                urn="urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,orders,PROD)",
+                name="orders",
+                qualified_name="orders",
+                description="Current order records for Finance reporting.",
+            )
+        ]
+    )
+
+    candidates = dataset_candidates(
+        "Validate the current records for Finance reporting.", "report.md", catalog
+    )
+
+    assert candidates == []
+
+
 def test_malformed_sql_falls_back_without_crashing(catalog) -> None:
     result = recommend_rules(
         "# Bad SQL\n```sql\nselect * from payments where note = 'oops\n```", "bad.md", catalog

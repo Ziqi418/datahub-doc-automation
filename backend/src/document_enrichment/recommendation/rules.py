@@ -123,27 +123,6 @@ def _score_datasets(extracted: ExtractedDocument, datasets: list[Dataset]) -> li
                     kind="exact_dataset_name", matched_text=dataset.name, location="document body"
                 ),
             )
-        fields = {field.casefold().split(".")[-1] for field in dataset.schema_fields}
-        matching_fields = sorted(fields & extracted.tokens)
-        if len(matching_fields) >= 2:
-            candidate.add(
-                12 * len(matching_fields),
-                Evidence(
-                    kind="schema_field_match",
-                    matched_text=", ".join(matching_fields[:5]),
-                    location="document body",
-                ),
-            )
-        description_terms = set(dataset.description.casefold().split()) & extracted.tokens
-        if len(description_terms) >= 2:
-            candidate.add(
-                min(20, len(description_terms) * 3),
-                Evidence(
-                    kind="description_keyword_match",
-                    matched_text=", ".join(sorted(description_terms)[:5]),
-                    location="document body",
-                ),
-            )
     # Include direct SQL matches even when otherwise tied, then preserve a deterministic order.
     return sorted(candidates.values(), key=lambda item: (-item.score, item.dataset.urn))
 
@@ -185,8 +164,6 @@ def _reason(evidence: Evidence) -> str:
     messages = {
         "sql_table_reference": f"SQL references {evidence.matched_text}.",
         "exact_dataset_name": f"Document explicitly mentions {evidence.matched_text}.",
-        "schema_field_match": f"Document matches schema fields: {evidence.matched_text}.",
-        "description_keyword_match": f"Document shares metadata keywords: {evidence.matched_text}.",
     }
     return messages.get(evidence.kind, "Rule-based metadata match.")
 

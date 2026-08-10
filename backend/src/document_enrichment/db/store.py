@@ -119,6 +119,25 @@ class SQLiteAnalysisStore:
             raise AnalysisNotFoundError(analysis_id)
         return str(row["content"])
 
+    def delete(self, analysis_id: str) -> None:
+        """Remove a local workflow and all of its dependent review/audit records."""
+        self.get(analysis_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("DELETE FROM review_actions WHERE analysis_id = ?", (analysis_id,))
+                connection.execute("DELETE FROM document_conflicts WHERE analysis_id = ?", (analysis_id,))
+                connection.execute(
+                    "DELETE FROM schema_validation_confirmations WHERE analysis_id = ?", (analysis_id,)
+                )
+                deleted = connection.execute("DELETE FROM analyses WHERE id = ?", (analysis_id,))
+                if deleted.rowcount != 1:
+                    raise AnalysisNotFoundError(analysis_id)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     def transition(
         self, analysis_id: str, target: AnalysisStatus, *, error_code: str | None = None
     ) -> AnalysisRecord:

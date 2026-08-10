@@ -6,7 +6,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = (await response.json().catch(() => null)) as { detail?: string } | null;
     throw new Error(body?.detail ?? `Request failed (${response.status})`);
   }
-  return response.json() as Promise<T>;
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 export async function uploadDocument(file: File): Promise<Analysis> { const form = new FormData(); form.append("file", file); return (await request<{ analysis: Analysis }>("/api/analyses", { method: "POST", body: form })).analysis; }
 export const getRecommendations = (id: string) => request<Analysis>(`/api/analyses/${id}/recommend`, { method: "POST" });
@@ -26,6 +26,7 @@ export const checkFreshness = (id: string) => request<FreshnessResponse>(`/api/a
 export const acknowledgeFreshness = (id: string) => request<Analysis>(`/api/analyses/${id}/freshness/acknowledge`, { method: "POST" });
 export const getAnalyses = () => request<AnalysisListResponse>("/api/analyses");
 export const getAnalysis = (id: string) => request<Analysis>(`/api/analyses/${id}`);
+export const deleteAnalysis = (id: string) => request<void>(`/api/analyses/${id}`, { method: "DELETE" });
 export const checkRecentDatabaseChanges = () => request<RecentChangeCheckResponse>("/api/freshness/recent-changes", { method: "POST" });
 export const applyFreshnessSuggestion = (id: string, evidenceIndex: number) => request<Analysis>(`/api/analyses/${id}/freshness/apply-suggestion?evidence_index=${evidenceIndex}`, { method: "POST" });
 export const returnToReview = (id: string) => request<Analysis>(`/api/analyses/${id}/return-to-review`, { method: "POST" });

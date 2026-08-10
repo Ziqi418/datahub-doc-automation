@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+import httpx
+
 from document_enrichment.config import Settings
 from document_enrichment.models import ReviewSelection
 
@@ -29,6 +31,8 @@ class DocumentPublisher(Protocol):
         selection: ReviewSelection,
     ) -> PublishedDocument: ...
 
+    async def delete(self, document_urn: str) -> None: ...
+
 
 class DataHubDocumentPublisher:
     """SDK v2 publisher which keeps a partially written document unsearchable."""
@@ -43,6 +47,28 @@ class DataHubDocumentPublisher:
         return await asyncio.to_thread(
             self._publish_sync, analysis_id, filename, source_sha256, content, selection
         )
+
+    async def delete(self, document_urn: str) -> None:
+        """Soft-delete the native Document before removing its local workflow record."""
+        headers = {"Content-Type": "application/json"}
+        if self.settings.datahub_token:
+            headers["Authorization"] = f"Bearer {self.settings.datahub_token}"
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.http_timeout_seconds) as client:
+                response = await client.post(
+                    str(self.settings.datahub_graphql_url),
+                    json={
+                        "query": "mutation DeleteDocument($urn: String!) { deleteDocument(urn: $urn) }",
+                        "variables": {"urn": document_urn},
+                    },
+                    headers=headers,
+                )
+                response.raise_for_status()
+                body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PublishError("DataHub document deletion failed") from exc
+        if body.get("errors") or not body.get("data", {}).get("deleteDocument"):
+            raise PublishError("DataHub document deletion failed")
 
     def _publish_sync(
         self, analysis_id: str, filename: str, source_sha256: str, content: str,

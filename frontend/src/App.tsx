@@ -42,6 +42,7 @@ import {
   Link,
   Route,
   Routes,
+  useNavigate,
   useParams,
 } from "react-router-dom";
 import {
@@ -55,6 +56,7 @@ import {
   checkSchemaValidation,
   confirmConflict,
   confirmSchemaReference,
+  deleteAnalysis,
   getAnalyses,
   getAnalysis,
   getConflicts,
@@ -102,7 +104,29 @@ const toCatalog = (item: CatalogItem): SelectionItem => ({
   userSelected: true,
 });
 
-export function Workflow() {
+function isDatasetBackedRecommendation(item: Recommendation | null | undefined) {
+  return Boolean(item && item.confidence >= 0.8 && item.evidence.some((evidence) =>
+    evidence.kind === "related_dataset_domain" || evidence.kind === "related_dataset_owner",
+  ));
+}
+
+function isSqlDatasetRecommendation(item: Recommendation) {
+  return item.evidence.some((evidence) => evidence.kind === "sql_table_reference");
+}
+
+function savedSelectionItem(urn: string, recommendations: Recommendation[] = []): SelectionItem {
+  const recommendation = recommendations.find((item) => item.urn === urn);
+  if (recommendation) return toRecommended(recommendation);
+  return {
+    urn,
+    name: urn.split(",")[1]?.replace(/[()]/g, "") ?? urn,
+    detail: "Saved selection",
+    userSelected: true,
+  };
+}
+
+export function Workflow({ analysisId }: { analysisId?: string }) {
+  const navigate = useNavigate();
   const [screen, setScreen] = useState<Screen>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -117,7 +141,7 @@ export function Workflow() {
   const [fieldDispositions, setFieldDispositions] = useState<FieldDisposition[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  const [loadingReview, setLoadingReview] = useState(Boolean(analysisId));
   const active =
     screen === "upload"
       ? 0
@@ -129,11 +153,54 @@ export function Workflow() {
   function applyRecommendations(next: Analysis) {
     const recs = next.recommendations;
     setAnalysis(next);
-    setDomain(recs?.domain ? toRecommended(recs.domain) : null);
-    setOwner(recs?.owner ? toRecommended(recs.owner) : null);
-    setTags(recs?.tags.map(toRecommended) ?? []);
-    setDatasets(recs?.datasets.map(toRecommended) ?? []);
+    setDomain(recs?.domain && isDatasetBackedRecommendation(recs.domain) ? toRecommended(recs.domain) : null);
+    setOwner(recs?.owner && isDatasetBackedRecommendation(recs.owner) ? toRecommended(recs.owner) : null);
+    setTags([]);
+    setDatasets(recs?.datasets.filter(isSqlDatasetRecommendation).map(toRecommended) ?? []);
   }
+  useEffect(() => {
+    const id = analysisId;
+    if (typeof id !== "string") {
+      setLoadingReview(false);
+      return;
+    }
+    const reviewId: string = id;
+    let cancelled = false;
+    async function resumeDraft() {
+      try {
+        const saved = await getAnalysis(reviewId);
+        if (saved.status !== "READY_FOR_REVIEW" || !saved.recommendations) {
+          throw new Error("This document is not available for review.");
+        }
+        const candidates = await getDatasetCandidates(reviewId);
+        if (cancelled) return;
+        const draft = saved.final_selection;
+        if (draft) {
+          setAnalysis(saved);
+          setDomain(draft.domain_urn ? savedSelectionItem(draft.domain_urn, [saved.recommendations.domain].filter(Boolean) as Recommendation[]) : null);
+          setOwner(draft.owner_urn ? savedSelectionItem(draft.owner_urn, [saved.recommendations.owner].filter(Boolean) as Recommendation[]) : null);
+          setTags(draft.tag_urns.map((urn) => savedSelectionItem(urn, saved.recommendations!.tags)));
+          setDatasets(draft.dataset_urns.map((urn) => savedSelectionItem(urn, saved.recommendations!.datasets)));
+          setFieldDispositions(draft.field_dispositions);
+        } else {
+          applyRecommendations(saved);
+        }
+        setDatasetCandidates(candidates.items);
+        setKeywordSearchDegraded(candidates.keyword_search_degraded);
+        setScreen("review");
+        setLoadingReview(false);
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : "Could not resume this review.");
+          setLoadingReview(false);
+        }
+      }
+    }
+    void resumeDraft();
+    return () => {
+      cancelled = true;
+    };
+  }, [analysisId]);
   async function analyze() {
     if (!file) {
       setError("Choose a Markdown or text file before continuing.");
@@ -187,17 +254,21 @@ export function Workflow() {
       setIsSaving(false);
     }
   }
-  async function saveDraft() {
-    if (!analysis) return;
+  async function saveDraft(): Promise<boolean> {
+    if (!analysis) return false;
     setIsSaving(true);
     try {
       setAnalysis(await saveReviewDraft(analysis.id, currentSelection()));
-      setDraftNotice("Draft saved. You can return and continue later.");
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Draft could not be saved.");
+      return false;
     } finally {
       setIsSaving(false);
     }
+  }
+  async function saveDraftAndExit() {
+    if (await saveDraft()) navigate("/documents");
   }
   function restart() {
     setScreen("upload");
@@ -210,7 +281,6 @@ export function Workflow() {
     setDatasetCandidates([]);
     setKeywordSearchDegraded(false);
     setFieldDispositions([]);
-    setDraftNotice(null);
     setError(null);
   }
   async function backToReview() {
@@ -301,17 +371,18 @@ export function Workflow() {
                 {error}
               </Alert>
             )}
-            {screen === "upload" && (
+            {loadingReview && <ReviewLoadingPanel />}
+            {!loadingReview && screen === "upload" && (
               <UploadPanel
                 file={file}
                 onFileChange={setFile}
                 onAnalyze={analyze}
               />
             )}
-            {screen === "analyzing" && (
+            {!loadingReview && screen === "analyzing" && (
               <AnalyzingPanel fileName={file?.name ?? "document"} />
             )}
-            {screen === "review" && analysis && (
+            {!loadingReview && screen === "review" && analysis && (
               <ReviewPanel
                 analysis={analysis}
                 domain={domain}
@@ -319,6 +390,8 @@ export function Workflow() {
                 tags={tags}
                 datasets={datasets}
                 datasetCandidates={datasetCandidates}
+                recommendedTags={analysis.recommendations?.tags ?? []}
+                recommendedDatasets={analysis.recommendations?.datasets ?? []}
                 keywordSearchDegraded={keywordSearchDegraded}
                 onDomainChange={setDomain}
                 onOwnerChange={setOwner}
@@ -327,12 +400,11 @@ export function Workflow() {
                 fieldDispositions={fieldDispositions}
                 onFieldDispositionsChange={setFieldDispositions}
                 onSave={submitReview}
-                onSaveDraft={saveDraft}
-                draftNotice={draftNotice}
+                onSaveDraftAndExit={saveDraftAndExit}
                 isSaving={isSaving}
               />
             )}
-            {screen === "result" && analysis && (
+            {!loadingReview && screen === "result" && analysis && (
               <ResultPanel
                 analysis={analysis}
                 domain={domain}
@@ -403,6 +475,7 @@ function DocumentsPage() {
   const [items, setItems] = useState<Analysis[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const load = () =>
     getAnalyses()
       .then((result) => setItems(result.items))
@@ -434,6 +507,22 @@ function DocumentsPage() {
       );
     } finally {
       setChecking(false);
+    }
+  }
+  async function removeDocument(item: Analysis) {
+    const message = item.status === "PUBLISHED"
+      ? "Delete this document from both the workspace and DataHub?"
+      : "Delete this draft from the workspace? This cannot be undone.";
+    if (!window.confirm(message)) return;
+    setDeletingId(item.id);
+    setError(null);
+    try {
+      await deleteAnalysis(item.id);
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete this document.");
+    } finally {
+      setDeletingId(null);
     }
   }
   return (
@@ -482,19 +571,27 @@ function DocumentsPage() {
               className="surface-card document-row"
               withBorder
               padding="md"
-              component={Link}
-              to={`/documents/${item.id}`}
             >
               <Group justify="space-between" wrap="nowrap">
-                <div>
-                  <Text fw={650}>{item.source_filename}</Text>
-                  <Text size="xs" c="dimmed" mt={3}>
-                    {item.status.replaceAll("_", " ")} · Updated{" "}
-                    {new Intl.DateTimeFormat(undefined, {
-                      dateStyle: "medium",
-                    }).format(new Date(item.updated_at))}
-                  </Text>
-                </div>
+                <Button
+                  component={Link}
+                  to={item.status === "READY_FOR_REVIEW" ? `/documents/${item.id}/review` : `/documents/${item.id}`}
+                  variant="subtle"
+                  color="dark"
+                  p={0}
+                  justify="flex-start"
+                  style={{ flex: 1 }}
+                >
+                  <div>
+                    <Text fw={650}>{item.source_filename}</Text>
+                    <Text size="xs" c="dimmed" mt={3}>
+                      {item.status.replaceAll("_", " ")} · Updated{" "}
+                      {new Intl.DateTimeFormat(undefined, {
+                        dateStyle: "medium",
+                      }).format(new Date(item.updated_at))}
+                    </Text>
+                  </div>
+                </Button>
                 <Group gap="xs">
                   <Badge
                     color={freshnessColor(item.freshness_status)}
@@ -503,6 +600,19 @@ function DocumentsPage() {
                     {item.freshness_status?.replaceAll("_", " ") ??
                       "NOT CHECKED"}
                   </Badge>
+                  <Tooltip label={item.status === "PUBLISHED" ? "Delete from workspace and DataHub" : "Delete draft"}>
+                    <Button
+                      variant="subtle"
+                      color="gray"
+                      aria-label={`Delete ${item.source_filename}`}
+                      p={5}
+                      h="auto"
+                      loading={deletingId === item.id}
+                      onClick={() => void removeDocument(item)}
+                    >
+                      <IconTrash size={17} />
+                    </Button>
+                  </Tooltip>
                   <IconArrowRight size={16} />
                 </Group>
               </Group>
@@ -615,6 +725,11 @@ function DocumentDetailPage() {
                   <Button component={Link} to="/documents/new" variant="subtle">
                     New review
                   </Button>
+                  {analysis.status === "READY_FOR_REVIEW" && (
+                    <Button component={Link} to={`/documents/${analysis.id}/review`} variant="default">
+                      Continue review
+                    </Button>
+                  )}
                 </Group>
               </Card>
               <Card className="surface-card" withBorder padding="lg">
@@ -692,10 +807,15 @@ export function App() {
         <Route path="/" element={<DocumentsPage />} />
         <Route path="/documents" element={<DocumentsPage />} />
         <Route path="/documents/new" element={<Workflow />} />
+        <Route path="/documents/:id/review" element={<ResumeReviewPage />} />
         <Route path="/documents/:id" element={<DocumentDetailPage />} />
       </Routes>
     </BrowserRouter>
   );
+}
+function ResumeReviewPage() {
+  const { id } = useParams();
+  return <Workflow analysisId={id} />;
 }
 function UploadPanel({
   file,
@@ -769,6 +889,23 @@ function AnalyzingPanel({ fileName }: { fileName: string }) {
     </Card>
   );
 }
+function ReviewLoadingPanel() {
+  return (
+    <Card className="surface-card" padding="xl" withBorder>
+      <Center>
+        <Stack align="center" gap="md" py="xl">
+          <ThemeIcon size={48} radius="xl" variant="light">
+            <IconLoader2 className="spin" size={22} />
+          </ThemeIcon>
+          <div className="center-copy">
+            <Title order={2} size="h3">Loading saved review</Title>
+            <Text c="dimmed" size="sm" mt={6}>Restoring your selections and review context.</Text>
+          </div>
+        </Stack>
+      </Center>
+    </Card>
+  );
+}
 function ReviewPanel({
   analysis,
   domain,
@@ -776,6 +913,8 @@ function ReviewPanel({
   tags,
   datasets,
   datasetCandidates,
+  recommendedTags,
+  recommendedDatasets,
   keywordSearchDegraded,
   onDomainChange,
   onOwnerChange,
@@ -784,8 +923,7 @@ function ReviewPanel({
   fieldDispositions,
   onFieldDispositionsChange,
   onSave,
-  onSaveDraft,
-  draftNotice,
+  onSaveDraftAndExit,
   isSaving,
 }: {
   analysis: Analysis;
@@ -794,6 +932,8 @@ function ReviewPanel({
   tags: SelectionItem[];
   datasets: SelectionItem[];
   datasetCandidates: Recommendation[];
+  recommendedTags: Recommendation[];
+  recommendedDatasets: Recommendation[];
   keywordSearchDegraded: boolean;
   onDomainChange: (x: SelectionItem | null) => void;
   onOwnerChange: (x: SelectionItem | null) => void;
@@ -802,8 +942,7 @@ function ReviewPanel({
   fieldDispositions: FieldDisposition[];
   onFieldDispositionsChange: (x: FieldDisposition[]) => void;
   onSave: () => void;
-  onSaveDraft: () => void;
-  draftNotice: string | null;
+  onSaveDraftAndExit: () => void;
   isSaving: boolean;
 }) {
   return (
@@ -854,11 +993,12 @@ function ReviewPanel({
             selected={owner ? [owner] : []}
             onChange={(x) => onOwnerChange(x[0] ?? null)}
           />
-          <ReviewCard kind="tags" selected={tags} onChange={onTagsChange} />
+          <ReviewCard kind="tags" selected={tags} recommended={recommendedTags} onChange={onTagsChange} />
           <ReviewCard
             kind="datasets"
             selected={datasets}
             candidates={datasetCandidates}
+            recommended={recommendedDatasets}
             onChange={onDatasetsChange}
           />
         </SimpleGrid>
@@ -870,8 +1010,8 @@ function ReviewPanel({
         />
         <Card className="save-bar" withBorder mt="lg" padding="md">
           <Group justify="space-between" align="center" wrap="wrap">
-            <div><Text size="sm" c="dimmed">Save a draft to continue later, or move on to the publishing preview.</Text>{draftNotice && <Text size="xs" c="green" mt={4}>{draftNotice}</Text>}</div>
-            <Group gap="xs"><Button variant="default" loading={isSaving} onClick={onSaveDraft}>Save draft</Button><Button data-testid="save-review" loading={isSaving} leftSection={<IconCheck size={16} />} onClick={onSave}>Preview & publish</Button></Group>
+            <Text size="sm" c="dimmed">Save this review and return to the document workspace, or continue to the publishing preview.</Text>
+            <Group gap="xs"><Button variant="default" loading={isSaving} onClick={onSaveDraftAndExit}>Save & exit</Button><Button data-testid="save-review" loading={isSaving} leftSection={<IconCheck size={16} />} onClick={onSave}>Preview & publish</Button></Group>
           </Group>
         </Card>
       </section>
@@ -882,11 +1022,13 @@ function ReviewCard({
   kind,
   selected,
   candidates = [],
+  recommended = [],
   onChange,
 }: {
   kind: EntityKind;
   selected: SelectionItem[];
   candidates?: Recommendation[];
+  recommended?: Recommendation[];
   onChange: (x: SelectionItem[]) => void;
 }) {
   const multi = kind === "tags" || kind === "datasets";
@@ -929,7 +1071,16 @@ function ReviewCard({
     setQuery("");
     setResults([]);
   }
-  const visibleCandidates = expanded ? candidates : candidates.slice(0, 5);
+  function selectRecommended() {
+    if (!multi) return;
+    onChange(
+      [...selected, ...recommended.map(toRecommended)]
+        .filter((item, index, items) => items.findIndex((candidate) => candidate.urn === item.urn) === index)
+        .slice(0, MAX_MULTI_SELECTION),
+    );
+  }
+  const unselectedCandidates = candidates.filter((item) => !selected.some((selection) => selection.urn === item.urn));
+  const visibleCandidates = expanded ? unselectedCandidates : unselectedCandidates.slice(0, 5);
   return (
     <Card className="surface-card review-card" withBorder padding="lg">
       <Group justify="space-between" align="start" mb="sm">
@@ -942,12 +1093,11 @@ function ReviewCard({
           </Text>
         </div>
         {multi && (
-          <Badge
-            variant="light"
-            color={selected.length === MAX_MULTI_SELECTION ? "orange" : "gray"}
-          >
-            {selected.length} / {MAX_MULTI_SELECTION}
-          </Badge>
+          <Group gap={4}>
+            <Badge variant="light" color={selected.length === MAX_MULTI_SELECTION ? "orange" : "gray"}>{selected.length} / {MAX_MULTI_SELECTION}</Badge>
+            {recommended.length > 0 && <Button size="compact-xs" variant="subtle" onClick={selectRecommended}>Select recommended</Button>}
+            {selected.length > 0 && <Button size="compact-xs" variant="subtle" color="gray" onClick={() => onChange([])}>Clear all</Button>}
+          </Group>
         )}
       </Group>
       <Stack gap="xs">
@@ -966,14 +1116,14 @@ function ReviewCard({
           />
         ))}
       </Stack>
-      {kind === "datasets" && candidates.length > 0 && (
+      {kind === "datasets" && unselectedCandidates.length > 0 && (
         <Stack gap={4} mt="sm">
           <Text size="xs" c="dimmed">
-            Evidence-first candidates (default 5 of {candidates.length})
+            {unselectedCandidates.length === 1
+              ? "1 evidence-backed candidate"
+              : `Top ${Math.min(5, unselectedCandidates.length)} of ${unselectedCandidates.length} evidence-backed candidates`}
           </Text>
-          {visibleCandidates
-            .filter((item) => !selected.some((x) => x.urn === item.urn))
-            .map((item) => (
+          {visibleCandidates.map((item) => (
               <Button
                 key={item.urn}
                 size="compact-xs"
@@ -985,7 +1135,7 @@ function ReviewCard({
                 <span>{Math.round(item.confidence * 100)}% evidence</span>
               </Button>
             ))}
-          {candidates.length > 5 && (
+          {unselectedCandidates.length > 5 && (
             <Button
               size="compact-xs"
               variant="default"
@@ -993,7 +1143,7 @@ function ReviewCard({
             >
               {expanded
                 ? "Show default 5"
-                : `Show all ${candidates.length} candidates`}
+                : `Show all ${unselectedCandidates.length} candidates`}
             </Button>
           )}
         </Stack>
@@ -1094,10 +1244,10 @@ function ReviewIntelligence({
       <Card className="surface-card" withBorder padding="lg">
         <Group justify="space-between" align="start" wrap="wrap">
           <div>
-            <Text fw={650}>Field ownership</Text>
-            <Text size="sm" c="dimmed">Check selected Dataset schemas and get one bounded, whitelist-only recommendation pass.</Text>
+            <Text fw={650}>Field validation</Text>
+            <Text size="sm" c="dimmed">Validate explicit field references against the selected Dataset schemas. Only ambiguous fields need a mapping decision.</Text>
           </div>
-          <Button variant="default" loading={checkingFields} onClick={() => void checkFields()} disabled={selection.dataset_urns.length === 0}>Check field ownership</Button>
+          <Button variant="default" loading={checkingFields} onClick={() => void checkFields()} disabled={selection.dataset_urns.length === 0}>Check field validation</Button>
         </Group>
         {fieldReview && (
           <Stack mt="md" gap="xs">
@@ -1117,7 +1267,7 @@ function ReviewIntelligence({
                   <Button size="compact-xs" variant="light" onClick={() => decide(reference.id, "business_term")}>Business term</Button>
                   <Button size="compact-xs" variant="light" onClick={() => decide(reference.id, "keep_unresolved")}>Keep unresolved</Button>
                 </Group>
-                {reference.candidate_dataset_urns.filter((urn) => urn !== suggestion?.dataset_urn).length > 0 && <Stack gap="xs" mt="sm"><Text size="xs" c="dimmed">Or map <strong>{reference.raw_reference}</strong> to another selected Dataset</Text>{reference.candidate_dataset_urns.filter((urn) => urn !== suggestion?.dataset_urn).map((urn) => <Group key={urn} justify="space-between" className="selected-item"><div><Text fw={600} size="sm">{nameFor(urn)}</Text><Text size="xs" c="dimmed">Map this field to this Dataset</Text></div><Button size="compact-xs" variant="light" onClick={() => decide(reference.id, "map_dataset", urn)}>Map</Button></Group>)}</Stack>}
+                {reference.status === "ambiguous" && reference.candidate_dataset_urns.filter((urn) => urn !== suggestion?.dataset_urn).length > 0 && <Stack gap="xs" mt="sm"><Text size="xs" c="dimmed">Or map <strong>{reference.raw_reference}</strong> to another selected Dataset</Text>{reference.candidate_dataset_urns.filter((urn) => urn !== suggestion?.dataset_urn).map((urn) => <Group key={urn} justify="space-between" className="selected-item"><div><Text fw={600} size="sm">{nameFor(urn)}</Text><Text size="xs" c="dimmed">Map this field to this Dataset</Text></div><Button size="compact-xs" variant="light" onClick={() => decide(reference.id, "map_dataset", urn)}>Map</Button></Group>)}</Stack>}
               </Card>;
             })}
           </Stack>

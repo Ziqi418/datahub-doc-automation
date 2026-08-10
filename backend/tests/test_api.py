@@ -44,14 +44,22 @@ def _client(tmp_path, in_memory_catalog):
             datasets=[LLMItem(urn=rule.datasets[0].urn, score=0.9, reason="SQL")],
         )
     )
-    app.dependency_overrides[get_publisher] = lambda: FakePublisher()
+    publisher = FakePublisher()
+    app.state.fake_publisher = publisher
+    app.dependency_overrides[get_publisher] = lambda: publisher
     app.dependency_overrides[get_conflict_gateway] = lambda: FakeConflictGateway()
     return TestClient(app)
 
 
 class FakePublisher:
+    def __init__(self):
+        self.deleted_urns: list[str] = []
+
     async def publish(self, *, analysis_id, **_kwargs):
         return type("Published", (), {"urn": f"urn:li:document:doc-enrichment-{analysis_id}"})()
+
+    async def delete(self, document_urn: str):
+        self.deleted_urns.append(document_urn)
 
 
 class FakeConflictGateway:
@@ -139,6 +147,46 @@ def test_review_draft_keeps_analysis_in_review(tmp_path, in_memory_catalog) -> N
         assert saved.status_code == 200
         assert saved.json()["status"] == AnalysisStatus.READY_FOR_REVIEW.value
         assert saved.json()["final_selection"]["dataset_urns"]
+
+
+def test_delete_draft_removes_only_local_workflow(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post(
+            "/api/analyses",
+            files={"file": ("draft.md", b"# Draft", "text/markdown")},
+        )
+        analysis_id = uploaded.json()["analysis"]["id"]
+
+        assert client.delete(f"/api/analyses/{analysis_id}").status_code == 204
+        assert client.get(f"/api/analyses/{analysis_id}").status_code == 404
+        assert client.app.state.fake_publisher.deleted_urns == []
+
+
+def test_delete_published_document_removes_datahub_document_first(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post(
+            "/api/analyses",
+            files={
+                "file": (
+                    "published.md",
+                    b"# Published\n```sql\nselect * from fct_orders\n```",
+                    "text/markdown",
+                )
+            },
+        )
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        assert client.put(
+            f"/api/analyses/{analysis_id}/review",
+            json={"dataset_urns": ["urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"]},
+        ).status_code == 200
+        published = client.post(f"/api/analyses/{analysis_id}/publish")
+        assert published.status_code == 200
+        document_urn = published.json()["document_urn"]
+
+        assert client.delete(f"/api/analyses/{analysis_id}").status_code == 204
+        assert client.app.state.fake_publisher.deleted_urns == [document_urn]
+        assert client.get(f"/api/analyses/{analysis_id}").status_code == 404
 
 
 def test_publish_failure_stays_retryable(tmp_path, in_memory_catalog) -> None:
@@ -460,6 +508,35 @@ def test_schema_linter_resolves_a_qualified_field_for_one_selected_dataset(
         ]
         resolved = next(item for item in references if item["field_path"] == "net_revenue")
         assert resolved["status"] == "resolved"
+
+
+def test_resolved_field_does_not_call_field_disambiguation(tmp_path, in_memory_catalog) -> None:
+    with _client(tmp_path, in_memory_catalog) as client:
+        uploaded = client.post(
+            "/api/analyses",
+            files={
+                "file": (
+                    "schema.md",
+                    b"# Schema\n```sql\nselect fct_orders.net_revenue from fct_orders\n```",
+                    "text/markdown",
+                )
+            },
+        )
+        analysis_id = uploaded.json()["analysis"]["id"]
+        assert client.post(f"/api/analyses/{analysis_id}/recommend").status_code == 200
+        provider = FakeLLMProvider(LLMResponse())
+        client.app.state.llm_provider = provider
+        checked = client.post(
+            f"/api/analyses/{analysis_id}/review/field-check",
+            json={
+                "dataset_urns": [
+                    "urn:li:dataset:(urn:li:dataPlatform:jaffle_shop,fct_orders,PROD)"
+                ]
+            },
+        )
+        assert checked.status_code == 200
+        assert checked.json()["references"][0]["status"] == "resolved"
+        assert provider.calls == 0
 
 
 def test_review_field_check_batches_without_blocking_preview(

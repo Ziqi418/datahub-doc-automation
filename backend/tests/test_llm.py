@@ -96,6 +96,29 @@ async def test_llm_returns_all_recommendation_types(
 
 
 @pytest.mark.asyncio
+async def test_dataset_backed_domain_and_owner_are_not_overridden_by_llm(
+    catalog: CatalogSnapshot, rules: RecommendationSet
+) -> None:
+    catalog.domains.append(Domain(urn="urn:li:domain:other", name="Other"))
+    catalog.owners.append(
+        Owner(urn="urn:li:corpuser:other", name="Other owner", owner_type="CORP_USER")
+    )
+    response = _response(catalog.datasets[0].urn)
+    response.domain = LLMItem(urn="urn:li:domain:other", score=0.99, reason="guess")
+    response.owner = LLMItem(urn="urn:li:corpuser:other", score=0.99, reason="guess")
+
+    result = await recommend_with_llm(
+        provider=FakeLLMProvider(response),
+        text="daily sales",
+        catalog=catalog,
+        rule_recommendations=rules,
+    )
+
+    assert result.domain == rules.domain
+    assert result.owner == rules.owner
+
+
+@pytest.mark.asyncio
 async def test_llm_rejects_urn_outside_candidate_whitelist(
     catalog: CatalogSnapshot, rules: RecommendationSet
 ) -> None:

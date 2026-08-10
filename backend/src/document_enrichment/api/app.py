@@ -65,6 +65,7 @@ from document_enrichment.models import (
 from document_enrichment.publishing import (
     DataHubDocumentPublisher,
     DocumentPublisher,
+    PublishError,
     PublishVerificationError,
 )
 from document_enrichment.recommendation.llm import (
@@ -159,7 +160,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=app_settings.cors_origin_list,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -217,6 +218,26 @@ def create_app(
     ) -> AnalysisListResponse:
         items = store.list(limit=limit)
         return AnalysisListResponse(items=items, total=len(items))
+
+    @app.delete("/api/analyses/{analysis_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_analysis(
+        analysis_id: str,
+        store: Annotated[SQLiteAnalysisStore, Depends(get_store)],
+        publisher: Annotated[DocumentPublisher, Depends(get_publisher)],
+    ) -> Response:
+        try:
+            record = store.get(analysis_id)
+            if record.document_urn:
+                await publisher.delete(record.document_urn)
+            store.delete(analysis_id)
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        except AnalysisNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Analysis not found") from exc
+        except PublishError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="DataHub document deletion failed; local record was kept",
+            ) from exc
 
     @app.post("/api/analyses/{analysis_id}/recommend", response_model=AnalysisRecord)
     async def recommend_analysis(
@@ -905,7 +926,24 @@ async def _retrieve_dataset_candidates(
     keyword_results: list[Dataset] = []
     try:
         for term in dict.fromkeys(terms):
-            keyword_results.extend(await gateway.keyword_search_datasets(term, limit=30))
+            results = await gateway.keyword_search_datasets(term, limit=30)
+            # A SQL table reference is already strong Dataset-level evidence.  Keep
+            # the native search only as a recall fallback for that same table,
+            # rather than exposing every loosely related Dataset as a suggestion.
+            if extracted.table_references:
+                normalized = term.casefold()
+                keyword_results.extend(
+                    item
+                    for item in results
+                    if normalized
+                    in {
+                        item.name.casefold(),
+                        item.qualified_name.casefold(),
+                        item.qualified_name.casefold().rsplit(".", 1)[-1],
+                    }
+                )
+            else:
+                keyword_results.extend(results)
     except CatalogUnavailableError:
         # Candidate recall remains deterministic when DataHub keyword search is unavailable.
         return deterministic, True
