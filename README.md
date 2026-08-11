@@ -2,6 +2,10 @@
 
 Review-first MVP that recommends existing DataHub metadata for a Markdown or TXT document. This repository implements the demo metadata, read-only catalog, deterministic retrieval, constrained LLM ranking, workflow/review API, and safe DataHub Document publishing (implementation-plan phases 1–5 and 7).
 
+## Demo
+
+[Watch the Loom demo](https://www.loom.com/share/f6b3e42b91424f72bf9772b49abbce35)
+
 ## What it does
 
 Documentation often describes important data assets without being connected to
